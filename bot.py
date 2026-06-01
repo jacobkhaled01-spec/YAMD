@@ -224,6 +224,12 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
         "merge_output_format": "mp4",
         "format": fmt,
         "progress_hooks": [hook],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"],
+                "skip": ["hls", "webpage"]
+            }
+        },
     }
 
     if COOKIE_FILE and os.path.exists(COOKIE_FILE):
