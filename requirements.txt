@@ -1,0 +1,3 @@
+python-telegram-bot[httpx]>=20.0
+yt-dlp
+httpx
