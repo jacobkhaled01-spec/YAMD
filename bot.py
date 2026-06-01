@@ -23,6 +23,7 @@ QUALITY = {
     "240":   ("🐢 240p", "bestvideo[height<=240]+bestaudio/best[height<=240]"),
     "360":   ("🎥 360p", "bestvideo[height<=360]+bestaudio/best[height<=360]"),
     "480":   ("🎥 480p", "bestvideo[height<=480]+bestaudio/best[height<=480]"),
+    "best":  ("✨ أفضل جودة", "bestvideo+bestaudio/best"),
     "audio": ("🔊 MP3",  "bestaudio/best"),
 }
 
@@ -148,6 +149,9 @@ def split_video(filepath: str, max_part_size=MAX_SIZE):
     parts = sorted(Path(base).parent.glob(f"{Path(filepath).stem}_part*.mp4"))
     return [str(p) for p in parts]
 
+# ═══════════════════════════════════════
+#  التحميل والرفع (مع إعادة المحاولة التلقائية بتنسيق "best")
+# ═══════════════════════════════════════
 async def do_download(ctx, chat_id: int, url: str, fmt: str,
                       qkey: str, status_msg, uid: int):
     loop   = asyncio.get_running_loop()
@@ -182,6 +186,115 @@ async def do_download(ctx, chat_id: int, url: str, fmt: str,
                 f"📦 {done}/{tot} [{pct}]  ETA: {eta}"),
             loop)
 
+    # المحاولة الأولى بالتنسيق المعطى
+    success, filename = await _attempt_download(loop, fmt, vid_id, url, status_msg, uid, qkey, t0)
+    if not success:
+        if "not available" in str(filename).lower() or "format" in str(filename).lower():
+            await safe_edit(status_msg, "🔄 التنسيق غير متوفر... إعادة المحاولة بأفضل جودة.")
+            # إعادة المحاولة بتنسيق best
+            success2, filename2 = await _attempt_download(loop, "bestvideo+bestaudio/best", vid_id, url, status_msg, uid, qkey, t0)
+            if not success2:
+                await status_msg.edit_text(
+                    f"❌ فشل التحميل: {str(filename2)[:250]}\n\n"
+                    "💡 جرب جودة أخرى:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(label, callback_data=f"q|{k}|{url}")]
+                        for k, (label, _) in QUALITY.items()
+                    ])
+                )
+                return
+            filename = filename2
+        else:
+            await status_msg.edit_text(
+                f"❌ {str(filename)[:250]}\n\n"
+                "💡 جرب جودة أخرى:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(label, callback_data=f"q|{k}|{url}")]
+                    for k, (label, _) in QUALITY.items()
+                ])
+            )
+            return
+
+    try:
+        with yt_dlp.YoutubeDL({}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        # استخراج info بعد التحميل الناجح
+        with yt_dlp.YoutubeDL({"quiet":True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except:
+        info = {}
+
+    size = os.path.getsize(filename)
+    speed = spd["kbs"]
+    title = (info.get("title") or "")[:200]
+
+    if size > MAX_SIZE:
+        await safe_edit(status_msg, "📦 الملف كبير، جارٍ تقسيمه إلى أجزاء...")
+        if not HAS_FFMPEG:
+            await status_msg.edit_text("❌ الملف كبير جداً ولا يوجد ffmpeg لتقسيمه. حاول جودة أقل.")
+            cleanup(vid_id)
+            return
+        parts = await loop.run_in_executor(None, lambda: split_video(filename, MAX_SIZE))
+        if not parts or len(parts) == 0:
+            await status_msg.edit_text("❌ فشل تقسيم الملف. جرب جودة أقل.")
+            cleanup(vid_id)
+            return
+        total_parts = len(parts)
+        await safe_edit(status_msg, f"📤 جارٍ إرسال {total_parts} أجزاء...")
+        base_caption = f"<b>{title}</b>\n👤 {info.get('uploader','')}\n📥 {BOT_NAME}\n"
+        for idx, part in enumerate(parts, start=1):
+            part_size = os.path.getsize(part)
+            part_caption = f"{base_caption}📦 جزء {idx}/{total_parts} | {fmt_size(part_size)}"
+            kw = dict(
+                chat_id=chat_id, caption=part_caption, parse_mode="HTML",
+                read_timeout=600, write_timeout=600,
+            )
+            with open(part, "rb") as f:
+                await ctx.bot.send_video(
+                    video=f, supports_streaming=True,
+                    width=info.get("width"),
+                    height=info.get("height"),
+                    duration=int(info.get("duration",0)) // total_parts if idx == 1 else None,
+                    **kw)
+            try: os.remove(part)
+            except: pass
+        await safe_edit(status_msg, "✅ تم إرسال جميع الأجزاء.")
+        db_log(uid, url, title, qkey, size, speed)
+        await asyncio.sleep(3)
+        await status_msg.delete()
+    else:
+        elapsed = int(time.time() - t0)
+        await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}...\n⏱ {elapsed}ث")
+        caption = (
+            f"<b>{title}</b>\n"
+            f"👤 {info.get('uploader','')}\n"
+            f"⚡ {fmt_speed(speed)}  ⏱ {elapsed}ث\n"
+            f"📥 {BOT_NAME}"
+        )
+        kw = dict(
+            chat_id=chat_id, caption=caption, parse_mode="HTML",
+            read_timeout=600, write_timeout=600,
+        )
+        with open(filename, "rb") as f:
+            if qkey == "audio":
+                await ctx.bot.send_audio(
+                    audio=f, title=title[:64],
+                    performer=info.get("uploader","YAMD"), **kw)
+            else:
+                await ctx.bot.send_video(
+                    video=f, supports_streaming=True,
+                    width=info.get("width"),
+                    height=info.get("height"),
+                    duration=int(info.get("duration") or 0),
+                    **kw)
+        total_t = int(time.time() - t0)
+        db_log(uid, url, title, qkey, size, speed)
+        try:
+            await status_msg.delete()
+        except: pass
+        logger.info(f"✅ {title[:50]} | {fmt_size(size)} | {total_t}ث")
+
+async def _attempt_download(loop, fmt, vid_id, url, status_msg, uid, qkey, t0):
     opts = {
         "outtmpl":                       str(DL_DIR / f"{vid_id}.%(ext)s"),
         "quiet":                         True,
@@ -200,9 +313,7 @@ async def do_download(ctx, chat_id: int, url: str, fmt: str,
         "prefer_ffmpeg":                 True,
         "merge_output_format":           "mp4",
         "format":                        fmt,
-        "progress_hooks":                [hook],
     }
-
     if qkey == "audio":
         del opts["merge_output_format"]
         opts["postprocessors"] = [{
@@ -211,111 +322,24 @@ async def do_download(ctx, chat_id: int, url: str, fmt: str,
             "preferredquality": "128",
         }]
 
-    filename = None
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await loop.run_in_executor(
-                None, lambda: ydl.extract_info(url, download=True))
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             raw  = ydl.prepare_filename(info)
-
-        real_id = info.get("id") or vid_id
-
         for ext in (["mp3"] if qkey=="audio" else ["mp4","mkv","webm",""]):
             candidate = os.path.splitext(raw)[0] + (f".{ext}" if ext else "")
             if os.path.exists(candidate):
-                filename = candidate
-                break
-        if not filename:
-            filename = find_file(vid_id)
-        if not filename:
-            await status_msg.edit_text("❌ الملف غير موجود بعد التحميل.")
-            return
-
-        size = os.path.getsize(filename)
-        speed = spd["kbs"]
-        title = (info.get("title") or "")[:200]
-
-        if size > MAX_SIZE:
-            await safe_edit(status_msg, "📦 الملف كبير، جارٍ تقسيمه إلى أجزاء...")
-            if not HAS_FFMPEG:
-                await status_msg.edit_text("❌ الملف كبير جداً ولا يوجد ffmpeg لتقسيمه. حاول جودة أقل.")
-                cleanup(vid_id)
-                return
-            parts = await loop.run_in_executor(None, lambda: split_video(filename, MAX_SIZE))
-            if not parts or len(parts) == 0:
-                await status_msg.edit_text("❌ فشل تقسيم الملف. جرب جودة أقل.")
-                cleanup(vid_id)
-                return
-            total_parts = len(parts)
-            await safe_edit(status_msg, f"📤 جارٍ إرسال {total_parts} أجزاء...")
-            base_caption = f"<b>{title}</b>\n👤 {info.get('uploader','')}\n📥 {BOT_NAME}\n"
-            for idx, part in enumerate(parts, start=1):
-                part_size = os.path.getsize(part)
-                part_caption = f"{base_caption}📦 جزء {idx}/{total_parts} | {fmt_size(part_size)}"
-                kw = dict(
-                    chat_id=chat_id, caption=part_caption, parse_mode="HTML",
-                    read_timeout=600, write_timeout=600,
-                )
-                with open(part, "rb") as f:
-                    await ctx.bot.send_video(
-                        video=f, supports_streaming=True,
-                        width=info.get("width"),
-                        height=info.get("height"),
-                        duration=int(info.get("duration",0)) // total_parts if idx == 1 else None,
-                        **kw)
-                try: os.remove(part)
-                except: pass
-            await safe_edit(status_msg, "✅ تم إرسال جميع الأجزاء.")
-            db_log(uid, url, title, qkey, size, speed)
-            await asyncio.sleep(3)
-            await status_msg.delete()
-        else:
-            elapsed = int(time.time() - t0)
-            await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}...\n⏱ {elapsed}ث")
-            caption = (
-                f"<b>{title}</b>\n"
-                f"👤 {info.get('uploader','')}\n"
-                f"⚡ {fmt_speed(speed)}  ⏱ {elapsed}ث\n"
-                f"📥 {BOT_NAME}"
-            )
-            kw = dict(
-                chat_id=chat_id, caption=caption, parse_mode="HTML",
-                read_timeout=600, write_timeout=600,
-            )
-            with open(filename, "rb") as f:
-                if qkey == "audio":
-                    await ctx.bot.send_audio(
-                        audio=f, title=title[:64],
-                        performer=info.get("uploader","YAMD"), **kw)
-                else:
-                    await ctx.bot.send_video(
-                        video=f, supports_streaming=True,
-                        width=info.get("width"),
-                        height=info.get("height"),
-                        duration=int(info.get("duration") or 0),
-                        **kw)
-            total_t = int(time.time() - t0)
-            db_log(uid, url, title, qkey, size, speed)
-            try:
-                await status_msg.delete()
-            except: pass
-            logger.info(f"✅ {title[:50]} | {fmt_size(size)} | {total_t}ث")
-
+                return True, candidate
+        f = find_file(vid_id)
+        if f:
+            return True, f
+        return False, "الملف غير موجود بعد التحميل"
     except Exception as e:
-        logger.error(f"[do_download] {e}", exc_info=True)
-        try:
-            await status_msg.edit_text(
-                f"❌ {str(e)[:250]}\n\n"
-                "💡 جرب جودة أخرى:",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(label, callback_data=f"q|{k}|{url}")]
-                    for k, (label, _) in QUALITY.items()
-                ])
-            )
-        except: pass
-    finally:
-        cleanup(vid_id)
+        return False, str(e)
 
+# ═══════════════════════════════════════
+#  الأوامر
+# ═══════════════════════════════════════
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db_user(update.effective_user)
     msg = (
@@ -323,7 +347,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"مرحباً بك في تجربة التحميل الأسرع على تلغرام. أنا بوت <b>{BOT_FULL_NAME}</b>، "
         "المصمم خصيصاً لخدمتك بأقصى سرعة ممكنة، حتى لو كان إنترنت لديك بطيئاً جداً (1x/2G/3G).\n\n"
         "<b>كيف تستخدم البوت؟</b>\n"
-        "فقط قم بنسخ رابط الفيديو من أي منصة (يوتيوب، تيك توك، فيسبوك، إنستغرام...) وأرسله هنا مباشرة.\n\n"
+        "فقط قم بنسخ رابط الفيديو من أي منصة (يوتيوب، تيك توك، فيسبوك، إنستغرام، بنترست...) وأرسله هنا مباشرة.\n\n"
         "سأقوم أنا بالجزء الصعب:\n"
         "1. تحميل الفيديو بأعلى جودة مناسبة.\n"
         "2. إذا كان الفيديو كبيراً جداً (>50MB)، سأقوم بتقسيمه تلقائياً إلى أجزاء أصغر وإرسالها لك.\n"
@@ -342,8 +366,7 @@ async def cmd_about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• تحميل فوري: أرسل الرابط واحصل على الفيديو فوراً دون خطوات إضافية.\n"
         "• خوارزمية ذكية: نختار أفضل جودة تناسب تلغرام تلقائياً (<50MB).\n"
         "• دعم الملفات الضخمة: إذا تجاوز الفيديو 50MB، نقوم بتقسيمه تلقائياً إلى أجزاء وإرسالها.\n"
-        "• ضغط فائق السرعة: ضغط ذكي للفيديوهات الكبيرة في ثوانٍ معدودة.\n"
-        "• دعم شامل: (TikTok, YouTube, Instagram, Facebook...) وغيرها.\n"
+        "• دعم شامل: (TikTok, YouTube, Instagram, Facebook, Pinterest...) وغيرها.\n"
         "• شريط تقدم ديناميكي: تابع السرعة الفائقة والوقت المتبقي بدقة.\n\n"
         "<b>السرعة ليست مجرد ميزة، إنها هويتنا.</b> 🚀"
     )
@@ -356,13 +379,8 @@ async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ أرسل رابطاً صالحاً.")
         return
 
-    fmt = (
-        "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=480]+bestaudio"
-        "/best[height<=480]"
-        "/best[filesize<49M]"
-        "/best"
-    )
+    # نبدأ بالتنسيق "bestvideo+bestaudio/best" (مرونة عالية)
+    fmt = "bestvideo+bestaudio/best"
 
     status = await update.message.reply_text("⬇️ جارٍ التحميل...")
     asyncio.create_task(
