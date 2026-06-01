@@ -3,7 +3,6 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-# تأكد من وجود aiohttp
 try:
     from aiohttp import web
 except ImportError:
@@ -35,7 +34,6 @@ QUALITY = {
     "audio": ("🔊 MP3",  "bestaudio/best"),
 }
 
-# سجل الأخطاء إلى ملف
 logging.basicConfig(level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("yamd.log")])
@@ -340,7 +338,7 @@ async def run_web_server():
     await site.start()
     logger.info(f"🌐 Health server on port {port}")
 
-def main():
+async def main():
     try:
         logger.info(f"ffmpeg: {'✅' if HAS_FFMPEG else '❌'}")
         logger.info(f"🚀 {BOT_NAME} يبدأ التشغيل...")
@@ -357,13 +355,28 @@ def main():
         app.add_handler(CallbackQueryHandler(on_quality, pattern=r"^q\|"))
         app.add_error_handler(on_error)
 
-        loop = asyncio.get_event_loop()
-        loop.create_task(run_web_server())
-        logger.info("بدء الاستماع...")
-        app.run_polling(allowed_updates=["message","callback_query"], drop_pending_updates=True)
+        # بدء خادم الويب
+        await run_web_server()
+
+        logger.info("بدء استقبال الرسائل...")
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(allowed_updates=["message","callback_query"], drop_pending_updates=True)
+        # انتظار لا نهائي
+        while True:
+            await asyncio.sleep(3600)
+
     except Exception:
         logger.critical("فشل في تشغيل البوت:\n" + traceback.format_exc())
         sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    # إنشاء حلقة أحداث جديدة (مطلوب في Python 3.14)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
