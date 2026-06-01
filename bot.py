@@ -1,9 +1,7 @@
-import os, time, asyncio, logging, sqlite3, shutil, subprocess, math, re, json
+import os, time, asyncio, logging, sqlite3, shutil, subprocess, math, re
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
@@ -19,13 +17,6 @@ MAX_SIZE   = 48 * 1024 * 1024
 DL_DIR     = Path.home() / "yamd_dl"
 DL_DIR.mkdir(exist_ok=True)
 HAS_FFMPEG = bool(shutil.which("ffmpeg"))
-
-# Invidious instances (يمكن تغييرها)
-INVIDIOUS_INSTANCES = [
-    "https://invidious.snopyta.org",
-    "https://invidious.weblibre.org",
-    "https://yewtu.be",
-]
 
 QUALITY = {
     "144":   ("🐢 144p", "bestvideo[height<=144]+bestaudio/best[height<=144]/worst"),
@@ -158,55 +149,21 @@ def split_video(filepath: str, max_part_size=MAX_SIZE):
     parts = sorted(Path(base).parent.glob(f"{Path(filepath).stem}_part*.mp4"))
     return [str(p) for p in parts]
 
-# ────────────── Invidious Helper ──────────────
-def get_youtube_id(url):
-    patterns = [
-        r'(?:v=|/)([0-9A-Za-z_-]{11})(?:[?&]|$)',
-        r'youtu\.be/([0-9A-Za-z_-]{11})'
-    ]
-    for p in patterns:
-        m = re.search(p, url)
-        if m:
-            return m.group(1)
-    return None
-
-def fetch_invidious_stream(video_id):
-    """يحاول الحصول على رابط مباشر للفيديو من Invidious."""
-    for instance in INVIDIOUS_INSTANCES:
-        try:
-            api_url = f"{instance}/api/v1/videos/{video_id}"
-            req = Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            # نختار أفضل جودة (عادة adaptiveFormats أو formatStreams)
-            streams = data.get("adaptiveFormats", []) + data.get("formatStreams", [])
-            if not streams:
-                continue
-            # نختار أعلى جودة فيديو + صوت
-            video_streams = [s for s in streams if s.get("type", "").startswith("video")]
-            if video_streams:
-                # ترتيب تنازلي حسب الجودة (quality)
-                video_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
-                return video_streams[0]["url"]
-        except Exception:
-            continue
-    return None
-
-# ────────────── Commands ──────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db_user(update.effective_user)
     msg = (
         f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n\n"
         f"مرحباً بك في تجربة التحميل الأسرع على تلغرام. أنا بوت <b>{BOT_FULL_NAME}</b>، "
-        "المصمم خصيصاً لخدمتك بأقصى سرعة ممكنة، حتى لو كان إنترنت لديك بطيئاً جداً.\n\n"
+        "المصمم خصيصاً لخدمتك بأقصى سرعة ممكنة.\n\n"
         "<b>طريقة الاستخدام:</b>\n"
         "فقط أرسل رابط الفيديو من أي منصة (يوتيوب، تيك توك، فيسبوك، انستغرام، بنترست...) وسأقوم بالباقي.\n\n"
         "⚡ <b>الميزات:</b>\n"
         "• تحميل فوري بأفضل جودة\n"
-        "• دعم الملفات الضخمة بالتقسيم التلقائي\n"
+        "• تجاوز حظر يوتيوب الذكي\n"
+        "• دعم الملفات الضخمة بالتقسيم\n"
         "• يعمل على أضعف الشبكات\n\n"
         "<b>ابدأ الآن.. أرسل رابطاً!</b> ⚡👇\n\n"
-        "💡 /about للمزيد من المعلومات"
+        "💡 /about للمزيد"
     )
     if update.effective_user.id == ADMIN_ID:
         msg += "\n🛡️ /admin"
@@ -214,13 +171,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     about_text = (
-        f"🌟 <b>{BOT_NAME}</b>\n"
-        f"<i>({BOT_FULL_NAME})</i>\n\n"
+        f"🌟 <b>{BOT_NAME}</b>\n<i>({BOT_FULL_NAME})</i>\n\n"
         "البوت الأول المصمم للسرعة القصوى حتى على أضعف الشبكات.\n\n"
         "⚡ <b>المميزات:</b>\n"
         "• تحميل فوري من جميع المنصات\n"
+        "• تجاوز ذكي لحظر يوتيوب\n"
         "• تقسيم ذكي للملفات الكبيرة\n"
-        "• دعم شامل: Pinterest, TikTok, YouTube, Instagram...\n"
         "• شريط تقدم ديناميكي\n\n"
         "<b>السرعة هويتنا.</b> 🚀"
     )
@@ -269,19 +225,8 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
             safe_edit(status_msg, f"⬇️ جارٍ التحميل...\n⚡ {fmt_speed(kbs)}\n📦 {done}/{tot} [{pct}]  ETA: {eta}"),
             loop)
 
-    is_youtube = "youtube.com" in url or "youtu.be" in url
     is_pin = "pin.it" in url or "pinterest" in url.lower()
-
-    # إذا كان يوتيوب، نحاول استخدام Invidious أولاً
-    if is_youtube:
-        video_id = get_youtube_id(url)
-        if video_id:
-            direct_url = await loop.run_in_executor(None, fetch_invidious_stream, video_id)
-            if direct_url:
-                await safe_edit(status_msg, "🔄 جارٍ التحميل عبر Invidious (بدون حظر)...")
-                # استخدم الرابط المباشر كمصدر
-                url = direct_url
-                fmt = "best"  # لا نحتاج لتنسيق معين
+    is_youtube = "youtube.com" in url or "youtu.be" in url
 
     opts = {
         "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
@@ -299,6 +244,13 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
         "format": fmt,
         "progress_hooks": [hook],
     }
+
+    # ✨ الحل الجذري: التنكر كمتصفح أندرويد عند التحميل من يوتيوب
+    if is_youtube:
+        opts["user_agent"] = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+        opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
+        logger.info("🍃 تفعيل وضع أندرويد لتجاوز حظر يوتيوب")
+
     if qkey == "audio":
         del opts["merge_output_format"]
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}]
@@ -310,53 +262,9 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
             raw = ydl.prepare_filename(info)
         filename = _locate_file(raw, info.get("id", vid_id), qkey)
     except Exception as e:
-        if "Sign in" in str(e) or "bot" in str(e):
-            await status_msg.edit_text("❌ يوتيوب يطلب التحقق. جارٍ المحاولة عبر Invidious...")
-            # المحاولة مرة أخرى عبر Invidious (إذا لم نكن قد استخدمناه)
-            if not is_youtube:
-                video_id = get_youtube_id(url)
-                if video_id:
-                    direct_url = await loop.run_in_executor(None, fetch_invidious_stream, video_id)
-                    if direct_url:
-                        url = direct_url
-                        opts["format"] = "best"
-                        try:
-                            with yt_dlp.YoutubeDL(opts) as ydl:
-                                info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-                                raw = ydl.prepare_filename(info)
-                            filename = _locate_file(raw, info.get("id", vid_id), qkey)
-                        except Exception as e2:
-                            await status_msg.edit_text(f"❌ فشل عبر Invidious: {str(e2)[:200]}")
-                            cleanup(vid_id)
-                            return
-                    else:
-                        await status_msg.edit_text("❌ Invidious غير متاح حالياً. حاول لاحقاً.")
-                        cleanup(vid_id)
-                        return
-                else:
-                    await status_msg.edit_text("❌ تعذّر استخراج معرف الفيديو.")
-                    cleanup(vid_id)
-                    return
-            else:
-                await status_msg.edit_text(f"❌ فشل: {str(e)[:200]}")
-                cleanup(vid_id)
-                return
-        elif "Requested format" in str(e) or "not available" in str(e):
-            await safe_edit(status_msg, "🔄 إعادة المحاولة بأفضل صيغة...")
-            opts["format"] = "best"
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-                    raw = ydl.prepare_filename(info)
-                filename = _locate_file(raw, info.get("id", vid_id), qkey)
-            except Exception as e2:
-                await status_msg.edit_text(f"❌ فشل: {str(e2)[:200]}")
-                cleanup(vid_id)
-                return
-        else:
-            await status_msg.edit_text(f"❌ {str(e)[:200]}")
-            cleanup(vid_id)
-            return
+        await status_msg.edit_text(f"❌ {str(e)[:200]}")
+        cleanup(vid_id)
+        return
 
     if not filename:
         await status_msg.edit_text("❌ الملف غير موجود.")
@@ -495,7 +403,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 
 def main():
     logger.info(f"ffmpeg: {'✅' if HAS_FFMPEG else '❌'}")
-    logger.info(f"🚀 {BOT_NAME} يعمل — تحميل فوري مع دعم Invidious لتفادي الحظر!")
+    logger.info(f"🚀 {BOT_NAME} يعمل — مع تجاوز ذكي لحظر يوتيوب!")
 
     app = (Application.builder()
            .token(BOT_TOKEN)
