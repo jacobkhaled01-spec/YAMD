@@ -1,14 +1,20 @@
-import os, time, asyncio, logging, sqlite3, shutil, subprocess, math, re
+import os, sys, time, asyncio, logging, sqlite3, shutil, subprocess, math, traceback
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
+# تأكد من وجود aiohttp
+try:
+    from aiohttp import web
+except ImportError:
+    import pip
+    pip.main(['install', 'aiohttp'])
+    from aiohttp import web
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 import yt_dlp
-from aiohttp import web
 
-# ═══════════════════════════════════════
 BOT_NAME      = "⚡ YAMD - Ultra Speed Downloader"
 BOT_FULL_NAME = "YAAQOB ALMAHAJERI MEDIA DOWNLOADER | ULTRA SPEED EDITION"
 
@@ -29,9 +35,10 @@ QUALITY = {
     "audio": ("🔊 MP3",  "bestaudio/best"),
 }
 
-# ═══════════════════════════════════════
+# سجل الأخطاء إلى ملف
 logging.basicConfig(level=logging.WARNING,
-    format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+    format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("yamd.log")])
 logger = logging.getLogger("YAMD")
 logger.setLevel(logging.INFO)
 for _lib in ("httpx","httpcore","telegram","hpack","asyncio"):
@@ -42,36 +49,13 @@ db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
 
 def _setup_db():
-    cols = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
-    if not cols:
-        db.execute("""CREATE TABLE users(
-            uid INTEGER PRIMARY KEY, username TEXT, fname TEXT,
-            seen TEXT, active TEXT, cnt INTEGER DEFAULT 0)""")
-    elif "user_id" in cols:
-        db.execute("""CREATE TABLE u2(uid INTEGER PRIMARY KEY,
-            username TEXT,fname TEXT,seen TEXT,active TEXT,cnt INTEGER DEFAULT 0)""")
-        db.execute("""INSERT INTO u2 SELECT user_id,
-            COALESCE(username,''),COALESCE(first_name,''),
-            COALESCE(first_seen,datetime('now')),
-            COALESCE(last_active,datetime('now')),
-            COALESCE(downloads_count,0) FROM users""")
-        db.execute("DROP TABLE users")
-        db.execute("ALTER TABLE u2 RENAME TO users")
-    dcols = {r[1] for r in db.execute("PRAGMA table_info(downloads)").fetchall()}
-    if not dcols:
-        db.execute("""CREATE TABLE downloads(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER, url TEXT, title TEXT,
-            quality TEXT, size INTEGER, speed REAL, ts TEXT)""")
-    elif "user_id" in dcols:
-        db.execute("""CREATE TABLE d2(id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER,url TEXT,title TEXT,quality TEXT,
-            size INTEGER,speed REAL,ts TEXT)""")
-        db.execute("""INSERT INTO d2(id,uid,url,title,quality,size,ts)
-            SELECT id,user_id,url,title,quality,
-            COALESCE(file_size,0),COALESCE(downloaded_at,datetime('now')) FROM downloads""")
-        db.execute("DROP TABLE downloads")
-        db.execute("ALTER TABLE d2 RENAME TO downloads")
+    db.execute("""CREATE TABLE IF NOT EXISTS users(
+        uid INTEGER PRIMARY KEY, username TEXT, fname TEXT,
+        seen TEXT, active TEXT, cnt INTEGER DEFAULT 0)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS downloads(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER, url TEXT, title TEXT,
+        quality TEXT, size INTEGER, speed REAL, ts TEXT)""")
     db.commit()
 _setup_db()
 
@@ -288,7 +272,6 @@ def _locate_file(raw, vid_id, qkey):
                    key=lambda f: f.stat().st_size, reverse=True)
     return str(cands[0]) if cands else None
 
-# ───── أزرار الجودة ─────
 async def on_quality(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -302,7 +285,6 @@ async def on_quality(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(f"⬇️ {label}...")
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt, qkey, q.message, q.from_user.id))
 
-# ───── Admin Dashboard ─────
 async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ للمشرف فقط."); return
@@ -344,7 +326,7 @@ async def on_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error(f"[ERROR] {ctx.error}", exc_info=ctx.error)
 
-# ───── خادم HTTP ─────
+# خادم HTTP
 async def health(request):
     return web.Response(text="YAMD is running!")
 
@@ -359,24 +341,29 @@ async def run_web_server():
     logger.info(f"🌐 Health server on port {port}")
 
 def main():
-    logger.info(f"ffmpeg: {'✅' if HAS_FFMPEG else '❌'}")
-    logger.info(f"🚀 {BOT_NAME} يعمل مع تجاوز يوتيوب النهائي!")
+    try:
+        logger.info(f"ffmpeg: {'✅' if HAS_FFMPEG else '❌'}")
+        logger.info(f"🚀 {BOT_NAME} يبدأ التشغيل...")
 
-    app = (Application.builder().token(BOT_TOKEN)
-           .connect_timeout(30).read_timeout(600).write_timeout(600)
-           .pool_timeout(120).concurrent_updates(True).build())
+        app = (Application.builder().token(BOT_TOKEN)
+               .connect_timeout(30).read_timeout(600).write_timeout(600)
+               .pool_timeout(120).concurrent_updates(True).build())
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("about", cmd_about))
-    app.add_handler(CommandHandler("admin", cmd_admin))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_link))
-    app.add_handler(CallbackQueryHandler(on_admin, pattern=r"^a\|"))
-    app.add_handler(CallbackQueryHandler(on_quality, pattern=r"^q\|"))
-    app.add_error_handler(on_error)
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("about", cmd_about))
+        app.add_handler(CommandHandler("admin", cmd_admin))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_link))
+        app.add_handler(CallbackQueryHandler(on_admin, pattern=r"^a\|"))
+        app.add_handler(CallbackQueryHandler(on_quality, pattern=r"^q\|"))
+        app.add_error_handler(on_error)
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_web_server())
-    app.run_polling(allowed_updates=["message","callback_query"], drop_pending_updates=True)
+        loop = asyncio.get_event_loop()
+        loop.create_task(run_web_server())
+        logger.info("بدء الاستماع...")
+        app.run_polling(allowed_updates=["message","callback_query"], drop_pending_updates=True)
+    except Exception:
+        logger.critical("فشل في تشغيل البوت:\n" + traceback.format_exc())
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
