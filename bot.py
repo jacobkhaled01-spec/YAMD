@@ -1,3 +1,4 @@
+import json
 import os, sys, time, asyncio, logging, sqlite3, shutil, subprocess, math, traceback, json
 from pathlib import Path
 from datetime import datetime
@@ -210,6 +211,17 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
     is_pin = "pin.it" in url or "pinterest" in url.lower()
 
     opts = {
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+                "pot_provider": {
+                    "bgutilhttp": {
+                        "base_url": "http://127.0.0.1:4416"
+                    }
+                },
+                "skip": ["hls", "webpage"]
+            }
+        },
         "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
         "quiet": True, "no_warnings": True, "noprogress": True,
         "socket_timeout": 60,
