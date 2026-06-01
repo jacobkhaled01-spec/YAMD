@@ -8,6 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import yt_dlp
 from aiohttp import web
 
+# ═══════════════════════════════════════
 BOT_NAME      = "⚡ YAMD - Ultra Speed Downloader"
 BOT_FULL_NAME = "YAAQOB ALMAHAJERI MEDIA DOWNLOADER | ULTRA SPEED EDITION"
 
@@ -28,6 +29,7 @@ QUALITY = {
     "audio": ("🔊 MP3",  "bestaudio/best"),
 }
 
+# ═══════════════════════════════════════
 logging.basicConfig(level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("YAMD")
@@ -38,6 +40,39 @@ for _lib in ("httpx","httpcore","telegram","hpack","asyncio"):
 db = sqlite3.connect("yamd.db", check_same_thread=False)
 db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
+
+def _setup_db():
+    cols = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
+    if not cols:
+        db.execute("""CREATE TABLE users(
+            uid INTEGER PRIMARY KEY, username TEXT, fname TEXT,
+            seen TEXT, active TEXT, cnt INTEGER DEFAULT 0)""")
+    elif "user_id" in cols:
+        db.execute("""CREATE TABLE u2(uid INTEGER PRIMARY KEY,
+            username TEXT,fname TEXT,seen TEXT,active TEXT,cnt INTEGER DEFAULT 0)""")
+        db.execute("""INSERT INTO u2 SELECT user_id,
+            COALESCE(username,''),COALESCE(first_name,''),
+            COALESCE(first_seen,datetime('now')),
+            COALESCE(last_active,datetime('now')),
+            COALESCE(downloads_count,0) FROM users""")
+        db.execute("DROP TABLE users")
+        db.execute("ALTER TABLE u2 RENAME TO users")
+    dcols = {r[1] for r in db.execute("PRAGMA table_info(downloads)").fetchall()}
+    if not dcols:
+        db.execute("""CREATE TABLE downloads(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER, url TEXT, title TEXT,
+            quality TEXT, size INTEGER, speed REAL, ts TEXT)""")
+    elif "user_id" in dcols:
+        db.execute("""CREATE TABLE d2(id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER,url TEXT,title TEXT,quality TEXT,
+            size INTEGER,speed REAL,ts TEXT)""")
+        db.execute("""INSERT INTO d2(id,uid,url,title,quality,size,ts)
+            SELECT id,user_id,url,title,quality,
+            COALESCE(file_size,0),COALESCE(downloaded_at,datetime('now')) FROM downloads""")
+        db.execute("DROP TABLE downloads")
+        db.execute("ALTER TABLE d2 RENAME TO downloads")
+    db.commit()
 _setup_db()
 
 def db_user(u):
@@ -93,20 +128,41 @@ def split_video(filepath, max_part_size=MAX_SIZE):
     parts = sorted(Path(base).parent.glob(f"{Path(filepath).stem}_part*.mp4"))
     return [str(p) for p in parts]
 
-# الأوامر
-async def cmd_start(update, ctx):
+# ───── الأوامر الأساسية ─────
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db_user(update.effective_user)
-    msg = (f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n\n"
-           "أرسل رابط الفيديو من أي منصة وسأقوم بالباقي.\n"
-           "⚡ تجاوز ذكي لحظر يوتيوب\n"
-           "/about للمزيد")
-    if update.effective_user.id == ADMIN_ID: msg += "\n🛡️ /admin"
+    msg = (
+        f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n\n"
+        f"مرحباً بك في تجربة التحميل الأسرع على تلغرام. أنا بوت <b>{BOT_FULL_NAME}</b>، "
+        "المصمم خصيصاً لخدمتك بأقصى سرعة ممكنة.\n\n"
+        "<b>طريقة الاستخدام:</b>\n"
+        "فقط أرسل رابط الفيديو من أي منصة (يوتيوب، تيك توك، فيسبوك، انستغرام، بنترست...) وسأقوم بالباقي.\n\n"
+        "⚡ <b>الميزات:</b>\n"
+        "• تحميل فوري بأفضل جودة\n"
+        "• تجاوز حظر يوتيوب الذكي\n"
+        "• دعم الملفات الضخمة بالتقسيم\n"
+        "• يعمل على أضعف الشبكات\n\n"
+        "<b>ابدأ الآن.. أرسل رابطاً!</b> ⚡👇\n\n"
+        "💡 /about للمزيد"
+    )
+    if update.effective_user.id == ADMIN_ID:
+        msg += "\n🛡️ /admin"
     await update.message.reply_text(msg, parse_mode="HTML")
 
-async def cmd_about(update, ctx):
-    await update.message.reply_text(f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\nأسرع بوت تحميل مع تجاوز ذكي لحظر يوتيوب.", parse_mode="HTML")
+async def cmd_about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    about_text = (
+        f"🌟 <b>{BOT_NAME}</b>\n<i>({BOT_FULL_NAME})</i>\n\n"
+        "البوت الأول المصمم للسرعة القصوى حتى على أضعف الشبكات.\n\n"
+        "⚡ <b>المميزات:</b>\n"
+        "• تحميل فوري من جميع المنصات\n"
+        "• تجاوز ذكي لحظر يوتيوب\n"
+        "• تقسيم ذكي للملفات الكبيرة\n"
+        "• شريط تقدم ديناميكي\n\n"
+        "<b>السرعة هويتنا.</b> 🚀"
+    )
+    await update.message.reply_text(about_text, parse_mode="HTML")
 
-async def on_link(update, ctx):
+async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db_user(update.effective_user)
     url = update.message.text.strip()
     if not url.startswith("http"):
@@ -161,20 +217,11 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
         "progress_hooks": [hook],
     }
 
-    # ✨ الحل الجذري النهائي: محاكاة تطبيقات يوتيوب الرسمية
     if is_youtube:
         opts["user_agent"] = "com.google.android.youtube/19.29.36 (Linux; U; Android 14; en_US) gzip"
-        opts["extractor_args"] = {
-            "youtube": {
-                "player_client": ["android_vr", "ios", "web"],
-                "skip": ["hls", "dash"]
-            }
-        }
-        opts["headers"] = {
-            "User-Agent": opts["user_agent"],
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        logger.info("🍃 استخدام محاكاة تطبيق YouTube VR/iOS")
+        opts["extractor_args"] = {"youtube": {"player_client": ["android_vr", "ios", "web"], "skip": ["hls", "dash"]}}
+        opts["headers"] = {"User-Agent": opts["user_agent"], "Accept-Language": "en-US,en;q=0.9"}
+        logger.info("🍃 محاكاة تطبيق YouTube VR/iOS لتجاوز الحظر")
 
     if qkey == "audio":
         del opts["merge_output_format"]
@@ -241,7 +288,63 @@ def _locate_file(raw, vid_id, qkey):
                    key=lambda f: f.stat().st_size, reverse=True)
     return str(cands[0]) if cands else None
 
-# خادم HTTP
+# ───── أزرار الجودة ─────
+async def on_quality(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("|", 2)
+    qkey = parts[1]
+    url = parts[2] if len(parts) > 2 else ctx.user_data.get("url","")
+    if not url:
+        await q.edit_message_text("❌ انتهت الجلسة.")
+        return
+    label, fmt = QUALITY[qkey]
+    await q.edit_message_text(f"⬇️ {label}...")
+    asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt, qkey, q.message, q.from_user.id))
+
+# ───── Admin Dashboard ─────
+async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ للمشرف فقط."); return
+    kb = [
+        [InlineKeyboardButton("👥 المستخدمون", callback_data="a|users")],
+        [InlineKeyboardButton("📜 آخر التحميلات", callback_data="a|dls")],
+        [InlineKeyboardButton("📊 إحصائيات", callback_data="a|stats")],
+        [InlineKeyboardButton("🗑 تنظيف مؤقت", callback_data="a|clean")],
+    ]
+    await update.message.reply_text(f"🛡️ <b>YAMD Admin</b>\nffmpeg: {'✅' if HAS_FFMPEG else '❌'}", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+async def on_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if q.from_user.id != ADMIN_ID:
+        await q.answer("⛔", show_alert=True); return
+    await q.answer()
+    act = q.data.split("|")[1]
+    if act == "users":
+        rows = db.execute("SELECT uid,username,fname,cnt,active FROM users ORDER BY active DESC LIMIT 15").fetchall()
+        t = "👥 <b>آخر 15 مستخدم</b>\n\n"
+        for uid,un,fn,cnt,ac in rows:
+            t += f"• <code>{uid}</code> {un or fn}  ⬇️{cnt}  {(ac or '')[:10]}\n"
+        await q.edit_message_text(t or "لا يوجد.", parse_mode="HTML")
+    elif act == "dls":
+        rows = db.execute("SELECT d.uid,d.title,d.quality,d.size,d.speed,d.ts,u.username FROM downloads d LEFT JOIN users u ON d.uid=u.uid ORDER BY d.id DESC LIMIT 20").fetchall()
+        t = "📜 <b>آخر 20 تحميلة</b>\n\n"
+        for uid,ttl,qual,sz,spd,ts,un in rows:
+            t += f"• <b>{un or uid}</b> | {qual} | {fmt_size(sz) if sz else '?'} | {fmt_speed(spd) if spd else '?'}\n  {(ttl or '')[:35]}\n"
+        await q.edit_message_text(t or "لا توجد.", parse_mode="HTML")
+    elif act == "stats":
+        uc = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        dc = db.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
+        avg = db.execute("SELECT AVG(speed) FROM downloads").fetchone()[0] or 0
+        await q.edit_message_text(f"📊 <b>YAMD Stats</b>\n\n👥 {uc} مستخدم\n📥 {dc} تحميلة\n⚡ متوسط: {fmt_speed(avg)}\nffmpeg: {'✅' if HAS_FFMPEG else '❌'}", parse_mode="HTML")
+    elif act == "clean":
+        for f in DL_DIR.iterdir(): f.unlink()
+        await q.edit_message_text("🗑 تم تنظيف المجلد المؤقت.")
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"[ERROR] {ctx.error}", exc_info=ctx.error)
+
+# ───── خادم HTTP ─────
 async def health(request):
     return web.Response(text="YAMD is running!")
 
@@ -257,10 +360,12 @@ async def run_web_server():
 
 def main():
     logger.info(f"ffmpeg: {'✅' if HAS_FFMPEG else '❌'}")
-    logger.info(f"🚀 {BOT_NAME} مع أحدث تجاوز لحظر يوتيوب!")
+    logger.info(f"🚀 {BOT_NAME} يعمل مع تجاوز يوتيوب النهائي!")
+
     app = (Application.builder().token(BOT_TOKEN)
            .connect_timeout(30).read_timeout(600).write_timeout(600)
            .pool_timeout(120).concurrent_updates(True).build())
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("about", cmd_about))
     app.add_handler(CommandHandler("admin", cmd_admin))
@@ -268,20 +373,10 @@ def main():
     app.add_handler(CallbackQueryHandler(on_admin, pattern=r"^a\|"))
     app.add_handler(CallbackQueryHandler(on_quality, pattern=r"^q\|"))
     app.add_error_handler(on_error)
+
     loop = asyncio.get_event_loop()
     loop.create_task(run_web_server())
     app.run_polling(allowed_updates=["message","callback_query"], drop_pending_updates=True)
-
-# الدوال الإدارية المختصرة (موجودة)
-def _setup_db():
-    db.execute("""CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY, username TEXT, fname TEXT, seen TEXT, active TEXT, cnt INTEGER DEFAULT 0)""")
-    db.execute("""CREATE TABLE IF NOT EXISTS downloads(id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER, url TEXT, title TEXT, quality TEXT, size INTEGER, speed REAL, ts TEXT)""")
-    db.commit()
-
-async def on_quality(update, ctx): pass  # مختصر
-async def cmd_admin(update, ctx): pass
-async def on_admin(update, ctx): pass
-async def on_error(update, ctx): pass
 
 if __name__ == "__main__":
     main()
