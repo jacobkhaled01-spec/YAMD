@@ -181,81 +181,78 @@ async def do_download(ctx, chat_id, url, qkey, status_msg, uid):
         is_youtube = "youtube.com" in url or "youtu.be" in url
         is_pin = "pin.it" in url or "pinterest" in url.lower()
 
-        # تنسيقات شاملة لا تقيد الامتداد أو الدقة
-        format_list = [
-            "bv*+ba/b",
-            "bv+ba/b",
-            "bestvideo+bestaudio/best",
-            "best"
-        ]
-        # جميع العملاء المعروفين
-        youtube_clients = [
-            ["android"],
-            ["ios"],
-            ["mweb"],
-            ["web_safari"],
-            ["tv_embedded"],
-            ["web"]
-        ]
+        # الإعدادات الأساسية
+        opts_base = {
+            "quiet": True, "no_warnings": True, "noprogress": True,
+            "socket_timeout": 120,
+            "retries": 15, "fragment_retries": 15,
+            "no_check_certificate": True,
+            "continuedl": True,
+            "concurrent_fragment_downloads": 4,
+            "http_chunk_size": 4 * 1024 * 1024,
+            "buffersize": 1024 * 1024,
+            "no_mtime": True, "no_playlist": True,
+            "prefer_ffmpeg": True,
+            "merge_output_format": "mp4",
+            "progress_hooks": [hook],
+            "throttledratelimit": 1000000,
+            "geo_bypass": True,
+        }
+        if HAS_ARIA2:
+            opts_base["external_downloader"] = "aria2c"
+            opts_base["external_downloader_args"] = ["-x", "8", "-s", "8", "-k", "1M"]
+        if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+            opts_base["cookiefile"] = COOKIE_FILE
+        if is_youtube:
+            opts_base["http_headers"] = {
+                "User-Agent": "com.google.android.youtube/20.10.38 (Linux; Android 14)",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        if qkey == "audio":
+            del opts_base["merge_output_format"]
+            opts_base["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}]
 
+        # إذا كان يوتيوب، نستخرج التنسيقات المتاحة ديناميكيًا
+        if is_youtube:
+            await safe_edit(status_msg, "🔍 جارٍ فحص التنسيقات المتاحة...")
+            try:
+                with yt_dlp.YoutubeDL({**opts_base, "format": "best"}) as ydl:
+                    info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+                formats = info.get("formats", [])
+                # البحث عن أفضل تنسيق فيديو+صوت بصيغة mp4 (أو أي صيغة)
+                best_format = None
+                best_quality = -1
+                for f in formats:
+                    if f.get("vcodec") != "none" and f.get("acodec") != "none":  # فيديو+صوت
+                        quality = f.get("height", 0) or 0
+                        if quality > best_quality:
+                            best_quality = quality
+                            best_format = f["format_id"]
+                if not best_format:
+                    # إذا لم نجد فيديو+صوت، نأخذ أفضل فيديو فقط
+                    best_format = "bestvideo+bestaudio/best"
+                # نحمّل بهذا التنسيق
+                opts = {**opts_base, "format": best_format}
+            except Exception as e:
+                await status_msg.edit_text(f"❌ فشل فحص الفيديو: {str(e)[:200]}")
+                return
+        else:
+            opts = {**opts_base, "format": "bestvideo+bestaudio/best"}
+
+        # بدء التحميل
         filename = None
-        for fmt in format_list:
-            if filename: break
-            for client_list in youtube_clients if is_youtube else [[]]:
-                opts = {
-                    "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
-                    "quiet": True, "no_warnings": True, "noprogress": True,
-                    "socket_timeout": 120,
-                    "retries": 15, "fragment_retries": 15,
-                    "no_check_certificate": True,
-                    "continuedl": True,
-                    "concurrent_fragment_downloads": 4,
-                    "http_chunk_size": 4 * 1024 * 1024,
-                    "buffersize": 1024 * 1024,
-                    "no_mtime": True, "no_playlist": True,
-                    "prefer_ffmpeg": True,
-                    "merge_output_format": "mp4",
-                    "format": fmt,
-                    "progress_hooks": [hook],
-                    "throttledratelimit": 1000000,
-                    "geo_bypass": True,
-                }
-                if HAS_ARIA2:
-                    opts["external_downloader"] = "aria2c"
-                    opts["external_downloader_args"] = ["-x", "8", "-s", "8", "-k", "1M"]
-                if COOKIE_FILE and os.path.exists(COOKIE_FILE):
-                    opts["cookiefile"] = COOKIE_FILE
-                if is_youtube:
-                    opts["http_headers"] = {
-                        "User-Agent": "com.google.android.youtube/20.10.38 (Linux; Android 14)",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    }
-                    if client_list:
-                        opts["extractor_args"] = {"youtube": {"player_client": client_list}}
-                if qkey == "audio":
-                    del opts["merge_output_format"]
-                    opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}]
-
-                try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-                        raw = ydl.prepare_filename(info)
-                    filename = _locate_file(raw, info.get("id", vid_id), qkey)
-                    if filename: break
-                except Exception as e:
-                    err = str(e)
-                    if "format" in err.lower() and "not available" in err.lower():
-                        continue
-                    elif "Sign in" in err or "bot" in err:
-                        continue
-                    else:
-                        await status_msg.edit_text(f"❌ {err[:200]}")
-                        cleanup(vid_id)
-                        return
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+                raw = ydl.prepare_filename(info)
+            filename = _locate_file(raw, info.get("id", vid_id), qkey)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ {str(e)[:200]}")
+            cleanup(vid_id)
+            return
 
         if not filename:
-            await status_msg.edit_text("❌ فشلت كل محاولات التحميل. جرب جودة أقل.")
-            cleanup(vid_id)
+            await status_msg.edit_text("❌ الملف غير موجود.")
             return
 
         size = os.path.getsize(filename)
@@ -306,7 +303,7 @@ def _locate_file(raw, vid_id, qkey):
                    key=lambda f: f.stat().st_size, reverse=True)
     return str(cands[0]) if cands else None
 
-# ─── Admin ───────────────────────────────
+# ─── Admin (اختصار) ───────────────────────────────
 async def cmd_admin(update, ctx):
     if update.effective_user.id != ADMIN_ID: await update.message.reply_text("⛔ للمشرف فقط."); return
     kb = [[InlineKeyboardButton("👥 المستخدمون", callback_data="a|users")],
