@@ -181,18 +181,27 @@ async def do_download(ctx, chat_id, url, qkey, status_msg, uid):
         is_youtube = "youtube.com" in url or "youtu.be" in url
         is_pin = "pin.it" in url or "pinterest" in url.lower()
 
-        # تنسيقات مرنة: bestvideo+bestaudio أولاً ثم best فقط
+        # تنسيقات شاملة لا تقيد الامتداد أو الدقة
         format_list = [
+            "bv*+ba/b",
+            "bv+ba/b",
             "bestvideo+bestaudio/best",
             "best"
         ]
-        # جميع العملاء بما فيهم web (ضروري لبعض الفيديوهات)
-        youtube_clients = [["android"], ["tv_embedded"], ["ios"], ["web"]]
+        # جميع العملاء المعروفين
+        youtube_clients = [
+            ["android"],
+            ["ios"],
+            ["mweb"],
+            ["web_safari"],
+            ["tv_embedded"],
+            ["web"]
+        ]
 
         filename = None
         for fmt in format_list:
             if filename: break
-            for client_list in (youtube_clients if is_youtube else [[]]):
+            for client_list in youtube_clients if is_youtube else [[]]:
                 opts = {
                     "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
                     "quiet": True, "no_warnings": True, "noprogress": True,
