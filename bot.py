@@ -24,11 +24,9 @@ HAS_ARIA2  = bool(shutil.which("aria2c"))
 
 DOWNLOAD_SEM = asyncio.Semaphore(2)
 
-# ─── تحضير ملف الكوكيز ────────────────────
+# ─── الكوكيز ────
 COOKIE_FILE = None
 COOKIE_TMP  = "/tmp/yamd_cookies.txt"
-
-# 1. تجربة COOKIES_TEXT أولاً
 COOKIES_TEXT = os.environ.get("COOKIES_TEXT", "")
 if COOKIES_TEXT and COOKIES_TEXT.strip():
     with open(COOKIE_TMP, "w", encoding="utf-8") as f:
@@ -37,7 +35,6 @@ if COOKIES_TEXT and COOKIES_TEXT.strip():
     COOKIE_FILE = COOKIE_TMP
     print("🍪 Cookies loaded from COOKIES_TEXT")
 else:
-    # 2. تجربة Secret File
     SECRET_FILE = "/etc/secrets/cookies.txt"
     if os.path.exists(SECRET_FILE):
         try:
@@ -48,10 +45,6 @@ else:
             print(f"⚠️ Failed to copy secret file: {e}")
     else:
         print("⚠️ NO COOKIES FOUND – YouTube may require sign-in")
-
-# سجل حالة الكوكيز بوضوح في الملف
-with open("yamd.log", "a") as log:
-    log.write(f"COOKIE_FILE = {COOKIE_FILE}\n")
 
 # ─── Logging ────────────────────────────
 logging.basicConfig(level=logging.WARNING,
@@ -188,13 +181,13 @@ async def do_download(ctx, chat_id, url, qkey, status_msg, uid):
         is_youtube = "youtube.com" in url or "youtu.be" in url
         is_pin = "pin.it" in url or "pinterest" in url.lower()
 
+        # تنسيقات مرنة: bestvideo+bestaudio أولاً ثم best فقط
         format_list = [
-            "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
-            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]",
-            "bv*[height<=480][ext=mp4]+ba[ext=m4a]/b[height<=480]",
+            "bestvideo+bestaudio/best",
             "best"
         ]
-        youtube_clients = [["android"], ["tv_embedded"], ["ios"]]
+        # جميع العملاء بما فيهم web (ضروري لبعض الفيديوهات)
+        youtube_clients = [["android"], ["tv_embedded"], ["ios"], ["web"]]
 
         filename = None
         for fmt in format_list:
