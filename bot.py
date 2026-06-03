@@ -155,24 +155,33 @@ def build_fmt(height: int, is_audio: bool = False) -> str:
     )
 
 # ── استخراج الجودات المتاحة ────────────────────────
+def _is_yt(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
 def _ydl_base_opts(url: str) -> dict:
-    """خيارات أساسية مشتركة لكل استخدام."""
+    """
+    خيارات أساسية — مع حل مشكلة YouTube على الخوادم (Render/VPS).
+    YouTube يحجب datacenter IPs ويطلب PO Token.
+    الحل: نستخدم player_client=tv_embedded أو android_vr
+    اللذان لا يحتاجان PO Token حتى على IPs الخوادم.
+    """
     opts = {
         "quiet":                True,
         "no_warnings":          True,
         "socket_timeout":       30,
         "no_check_certificate": True,
         "no_playlist":          True,
-        # ★ هذا يمنع خطأ "Requested format is not available"
-        # أثناء extract_info(download=False)
-        "format": "bestaudio/best",
+        "format":               "bestaudio/best",
     }
     if COOKIE_FILE and os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
-    if "youtube.com" in url or "youtu.be" in url:
-        opts["http_headers"] = {
-            "User-Agent": "com.google.android.youtube/20.10.38 (Linux; Android 14)",
-            "Accept-Language": "en-US,en;q=0.9",
+    if _is_yt(url):
+        # ★ الحل الرئيسي: player clients لا تحتاج PO Token على الخوادم
+        opts["extractor_args"] = {
+            "youtube": {
+                "player_client": ["tv_embedded", "android_vr", "ios", "android"],
+                "player_skip":   ["webpage", "configs", "js"],
+            }
         }
     return opts
 
@@ -406,10 +415,13 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
         if COOKIE_FILE and os.path.exists(COOKIE_FILE):
             opts["cookiefile"] = COOKIE_FILE
 
-        if "youtube.com" in url or "youtu.be" in url:
-            opts["http_headers"] = {
-                "User-Agent": "com.google.android.youtube/20.10.38 (Linux; Android 14)",
-                "Accept-Language": "en-US,en;q=0.9",
+        if _is_yt(url):
+            # ★ نفس الحل: player clients بدون PO Token
+            opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["tv_embedded", "android_vr", "ios", "android"],
+                    "player_skip":   ["webpage", "configs", "js"],
+                }
             }
 
         if qkey == "audio":
