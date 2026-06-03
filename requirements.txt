@@ -1,3 +1,22 @@
-python-telegram-bot>=20.0
-git+https://github.com/yt-dlp/yt-dlp.git@master
-aiohttp
+# التطبيق والبوت
+python-telegram-bot[all]==20.3
+apscheduler==3.10.4
+feedparser==6.0.10
+
+# الأدوات المساعدة
+requests==2.31.0
+python-dateutil==2.8.2
+pytz==2023.3
+
+# تطوير (اختياري)
+python-dotenv==1.0.0  # لإدارة المتغيرات البيئية
+
+# ملاحظات التثبيت:
+# لتثبيت جميع المتطلبات:
+# pip install -r requirements.txt
+#
+# لتثبيت مع الدعم الكامل:
+# pip install python-telegram-bot[all]==20.3
+#
+# للنشر على خادم:
+# pip3 install -r requirements.txt

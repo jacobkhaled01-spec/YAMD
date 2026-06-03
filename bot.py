@@ -9,6 +9,20 @@ from telegram.ext import (Application, CommandHandler, MessageHandler,
 import yt_dlp
 from aiohttp import web
 
+# ── تحديث yt-dlp تلقائياً عند كل بدء تشغيل ───────
+def _update_ytdlp():
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "--upgrade",
+             "yt-dlp @ https://github.com/yt-dlp/yt-dlp/archive/refs/heads/master.zip"],
+            capture_output=True, text=True, timeout=120)
+        import yt_dlp as _yt
+        print(f"✅ yt-dlp {_yt.version.__version__}", flush=True)
+    except Exception as e:
+        print(f"⚠️ yt-dlp update failed: {e}", flush=True)
+
+_update_ytdlp()
+
 BOT_NAME      = "⚡ YAMD – Ultra Speed"
 BOT_FULL_NAME = "YAAQOB ALMAHAJERI MEDIA DOWNLOADER"
 
@@ -26,17 +40,30 @@ DOWNLOAD_SEM = asyncio.Semaphore(3)
 # ── كوكيز ──────────────────────────────────────────
 COOKIE_FILE = None
 COOKIE_TMP  = "/tmp/yamd_cookies.txt"
-COOKIES_TEXT = os.environ.get("COOKIES_TEXT", "")
-if COOKIES_TEXT.strip():
-    with open(COOKIE_TMP, "w") as f:
-        f.write("# Netscape HTTP Cookie File\n")
-        f.write(COOKIES_TEXT.strip())
-    COOKIE_FILE = COOKIE_TMP
-else:
-    SECRET = "/etc/secrets/cookies.txt"
-    if os.path.exists(SECRET):
-        shutil.copy2(SECRET, COOKIE_TMP)
+
+def _load_cookies():
+    global COOKIE_FILE
+    COOKIES_TEXT = os.environ.get("COOKIES_TEXT", "").strip()
+    if COOKIES_TEXT:
+        content = COOKIES_TEXT
+        if not content.startswith("# Netscape"):
+            content = "# Netscape HTTP Cookie File\n" + content
+        with open(COOKIE_TMP, "w", encoding="utf-8") as f:
+            f.write(content)
+        lines = [l for l in content.splitlines() if l.strip() and not l.startswith("#")]
         COOKIE_FILE = COOKIE_TMP
+        print(f"🍪 Cookies loaded from COOKIES_TEXT ({len(lines)} entries)", flush=True)
+        return
+    # ملف Secret في Render
+    for path in ["/etc/secrets/cookies.txt", "/etc/secrets/cookies", "./cookies.txt"]:
+        if os.path.exists(path):
+            shutil.copy2(path, COOKIE_TMP)
+            COOKIE_FILE = COOKIE_TMP
+            print(f"🍪 Cookies loaded from {path}", flush=True)
+            return
+    print("⚠️  NO COOKIES — YouTube may block server IPs", flush=True)
+
+_load_cookies()
 
 # ── لوج ────────────────────────────────────────────
 logging.basicConfig(level=logging.WARNING,
