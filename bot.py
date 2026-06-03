@@ -179,8 +179,7 @@ def _ydl_base_opts(url: str) -> dict:
         # ★ الحل الرئيسي: player clients لا تحتاج PO Token على الخوادم
         opts["extractor_args"] = {
             "youtube": {
-                "player_client": ["tv_embedded", "android_vr", "ios", "android"],
-                "player_skip":   ["webpage", "configs", "js"],
+                "player_client": ["tv_embedded", "web_embedded", "ios", "android"],
             }
         }
     return opts
@@ -419,8 +418,7 @@ async def do_download(ctx, chat_id, url, fmt, qkey, status_msg, uid):
             # ★ نفس الحل: player clients بدون PO Token
             opts["extractor_args"] = {
                 "youtube": {
-                    "player_client": ["tv_embedded", "android_vr", "ios", "android"],
-                    "player_skip":   ["webpage", "configs", "js"],
+                    "player_client": ["tv_embedded", "web_embedded", "ios", "android"],
                 }
             }
 
