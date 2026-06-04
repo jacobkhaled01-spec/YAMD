@@ -124,45 +124,34 @@ async def cleanup_task():
             except: pass
         await asyncio.sleep(1800)
 
-# ─── استخراج التنسيقات المتاحة وعرضها ────
-async def show_formats(update, ctx, url, status_msg):
-    loop = asyncio.get_running_loop()
-    try:
-        info, video_fmts, best_audio = await loop.run_in_executor(None, extract_formats, url)
-    except Exception as e:
-        await status_msg.edit_text(f"❌ فشل استخراج التنسيقات: {str(e)[:200]}")
-        return
+# ─── معالجة Pinterest ────────────────
+PINTEREST_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36"
 
-    ctx.user_data['url'] = url
-    kb = []
-    # أزرار الفيديو: نخزن الارتفاع (height) ونوعه (v)
-    for v in video_fmts:
-        height = v['height']
-        size_str = f" (~{fmt_size(v['filesize'])})" if v['filesize'] else ""
-        label = f"🎥 {height}p {v['ext']}{size_str}"
-        kb.append([InlineKeyboardButton(label, callback_data=f"dl|v|{height}")])
-    # زر الصوت
-    if best_audio:
-        size_str = f" (~{fmt_size(best_audio['filesize'])})" if best_audio['filesize'] else ""
-        label = f"🔊 صوت MP3 {best_audio['ext']} {int(best_audio['abr'])}kbps{size_str}"
-        kb.append([InlineKeyboardButton(label, callback_data=f"dl|a|0")])  # height=0 يعني صوت
+def build_pinterest_opts(fmt, vid_id):
+    opts = {
+        "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
+        "quiet": True, "no_warnings": True, "noprogress": True,
+        "socket_timeout": 120,
+        "retries": 15, "fragment_retries": 15,
+        "no_check_certificate": True,
+        "continuedl": False,
+        "concurrent_fragment_downloads": 0,
+        "http_chunk_size": 4 * 1024 * 1024,
+        "buffersize": 1024 * 1024,
+        "no_mtime": True, "no_playlist": True,
+        "prefer_ffmpeg": True,
+        "merge_output_format": "mp4",
+        "format": fmt,
+        "http_headers": {"User-Agent": PINTEREST_UA, "Accept-Language": "en-US,en;q=0.9"},
+    }
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        opts["cookiefile"] = COOKIE_FILE
+    return opts
 
-    if not kb:
-        await status_msg.edit_text("❌ لا توجد تنسيقات متاحة لهذا الفيديو.")
-        return
-
-    await status_msg.edit_text(
-        f"🎞️ <b>{info.get('title', 'فيديو')[:200]}</b>\n"
-        f"اختر التنسيق المطلوب:",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="HTML"
-    )
-
+# ─── استخراج التنسيقات (لغير Pinterest) ────
 def extract_formats(url):
     opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
+        "quiet": True, "no_warnings": True, "extract_flat": False,
         "cookiefile": COOKIE_FILE if COOKIE_FILE and os.path.exists(COOKIE_FILE) else None,
         "http_headers": {
             "User-Agent": "com.google.android.youtube/20.10.38 (Linux; Android 14)",
@@ -181,14 +170,12 @@ def extract_formats(url):
             if height > 0 and height not in seen_heights:
                 seen_heights.add(height)
                 video_fmts.append({
-                    "format_id": f["format_id"],
                     "height": height,
                     "filesize": f.get("filesize") or f.get("filesize_approx") or 0,
                     "ext": f.get("ext", "mp4"),
                 })
         elif f.get("acodec") != "none" and f.get("vcodec") == "none":
             audio_fmts.append({
-                "format_id": f["format_id"],
                 "abr": f.get("abr") or 0,
                 "filesize": f.get("filesize") or f.get("filesize_approx") or 0,
                 "ext": f.get("ext", "m4a"),
@@ -197,33 +184,182 @@ def extract_formats(url):
     best_audio = max(audio_fmts, key=lambda x: x["abr"]) if audio_fmts else None
     return info, video_fmts, best_audio
 
-# ─── معالج الاختيار ─────────────────────
+# ─── عرض التنسيقات ──────────────────────
+async def show_formats(update, ctx, url, status_msg):
+    loop = asyncio.get_running_loop()
+    try:
+        info, video_fmts, best_audio = await loop.run_in_executor(None, extract_formats, url)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ فشل استخراج التنسيقات: {str(e)[:200]}")
+        return
+
+    ctx.user_data['url'] = url
+    kb = []
+    for v in video_fmts:
+        height = v['height']
+        size_str = f" (~{fmt_size(v['filesize'])})" if v['filesize'] else ""
+        label = f"🎥 {height}p {v['ext']}{size_str}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"dl|v|{height}")])
+    if best_audio:
+        size_str = f" (~{fmt_size(best_audio['filesize'])})" if best_audio['filesize'] else ""
+        label = f"🔊 صوت MP3 {best_audio['ext']} {int(best_audio['abr'])}kbps{size_str}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"dl|a|0")])
+
+    if not kb:
+        await status_msg.edit_text("❌ لا توجد تنسيقات متاحة لهذا الفيديو.")
+        return
+
+    await status_msg.edit_text(
+        f"🎞️ <b>{info.get('title', 'فيديو')[:200]}</b>\nاختر التنسيق المطلوب:",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML"
+    )
+
+# ─── أوامر البوت الأساسية ───────────────
+async def cmd_start(update, ctx):
+    db_user(update.effective_user)
+    msg = (f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n"
+           f"<b>{BOT_FULL_NAME}</b>\n\n"
+           "⚡ أرسل رابط الفيديو من أي منصة وسأحمّله بأقصى سرعة.\n"
+           "/about | /admin")
+    if update.effective_user.id == ADMIN_ID: msg += "\n🛡️ لوحة التحكم: /admin"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+async def cmd_about(update, ctx):
+    await update.message.reply_text(
+        f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\n"
+        "⚡ أسرع بوت تحميل على تلغرام.\n"
+        "✅ تجاوز حظر يوتيوب بذكاء\n"
+        "📦 تقسيم ذكي للملفات الكبيرة\n"
+        "🚀 aria2c + nightly yt-dlp\n"
+        "السرعة هي هويتنا.", parse_mode="HTML")
+
+async def on_link(update, ctx):
+    db_user(update.effective_user)
+    url = update.message.text.strip()
+    if not url.startswith("http"):
+        await update.message.reply_text("⚠️ أرسل رابطاً صالحاً.")
+        return
+
+    # معالجة خاصة لـ Pinterest: تحميل مباشر بدون قائمة التنسيقات
+    if "pin.it" in url or "pinterest" in url.lower():
+        status = await update.message.reply_text("⬇️ جارٍ تحميل فيديو Pinterest...")
+        fmt_str = "best"
+        asyncio.create_task(download_pinterest(ctx, update.message.chat_id, url, status, update.effective_user.id))
+        return
+
+    # باقي المنصات: عرض التنسيقات
+    status_msg = await update.message.reply_text("🔍 جارٍ فحص التنسيقات...")
+    await show_formats(update, ctx, url, status_msg)
+
+# ─── تحميل Pinterest ────────────────────
+async def download_pinterest(ctx, chat_id, url, status_msg, uid):
+    async with DOWNLOAD_SEM:
+        loop = asyncio.get_running_loop()
+        vid_id = f"v{uid}{int(time.time())}"
+        t0 = time.time()
+        spd = {"kbs":0,"bytes":0,"last_b":0,"last_t":t0}
+        def hook(d):
+            if d.get("status")!="downloading": return
+            got = d.get("downloaded_bytes") or 0
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            now = time.time()
+            dt = now - spd["last_t"]
+            if dt >= 1:
+                spd["kbs"] = max(0, (got - spd["last_b"]) / dt / 1024)
+                spd["last_b"] = got; spd["last_t"] = now
+            spd["bytes"] = got
+            kbs = spd["kbs"]
+            pct = f"{got/total*100:.0f}%" if total else "…"
+            eta = "?"
+            if kbs>0 and total:
+                s = (total - got) / 1024 / kbs
+                eta = f"{int(s//60)}د{int(s%60)}ث" if s>=60 else f"{int(s)}ث"
+            asyncio.run_coroutine_threadsafe(
+                safe_edit(status_msg, f"⬇️ جارٍ التحميل...\n⚡ {fmt_speed(kbs)}\n📦 {fmt_size(got)}/{fmt_size(total)} [{pct}]  ETA: {eta}"),
+                loop)
+
+        opts = build_pinterest_opts("best", vid_id)
+        opts["progress_hooks"] = [hook]
+
+        filename = None
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+                raw = ydl.prepare_filename(info)
+            # Pinterest قد يُخرج ملفًا بصيغة .mp4 أو .unknown، نبحث عنه
+            for ext in ["mp4", "mkv", "webm", ""]:
+                candidate = os.path.splitext(raw)[0] + (f".{ext}" if ext else "")
+                if os.path.exists(candidate):
+                    filename = candidate
+                    break
+            if not filename:
+                filename = find_file(vid_id)
+            if not filename:
+                await status_msg.edit_text("❌ الملف غير موجود بعد التحميل.")
+                return
+            size = os.path.getsize(filename)
+            if size == 0:
+                await status_msg.edit_text("❌ الملف المُحمّل فارغ. قد يكون الفيديو محذوفًا أو خاصًا.")
+                cleanup(vid_id)
+                return
+        except Exception as e:
+            await status_msg.edit_text(f"❌ {str(e)[:200]}")
+            cleanup(vid_id)
+            return
+
+        title = (info.get("title") or "")[:200]
+        speed = spd["kbs"]
+        if size > MAX_SIZE:
+            await safe_edit(status_msg, "📦 تقسيم...")
+            parts = await loop.run_in_executor(None, lambda: split_video(filename, MAX_SIZE))
+            if not parts:
+                await status_msg.edit_text("❌ فشل التقسيم.")
+                cleanup(vid_id)
+                return
+            total = len(parts)
+            base_cap = f"<b>{title}</b>\n👤 {info.get('uploader','')}\n📥 {BOT_NAME}\n"
+            for i, p in enumerate(parts, 1):
+                ps = os.path.getsize(p)
+                with open(p, "rb") as vf:
+                    await ctx.bot.send_video(chat_id=chat_id, video=vf,
+                                             caption=f"{base_cap}📦 جزء {i}/{total} | {fmt_size(ps)}",
+                                             parse_mode="HTML", read_timeout=600, write_timeout=600,
+                                             supports_streaming=True)
+                os.remove(p)
+            await safe_edit(status_msg, "✅ تم.")
+            db_log(uid, url, title, "pinterest", size, speed)
+            await asyncio.sleep(2)
+            await status_msg.delete()
+        else:
+            elapsed = int(time.time() - t0)
+            await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}... ⏱ {elapsed}ث")
+            caption = f"<b>{title}</b>\n👤 {info.get('uploader','')}\n⚡ {fmt_speed(speed)} | ⏱ {elapsed}ث\n📥 {BOT_NAME}"
+            kw = dict(chat_id=chat_id, caption=caption, parse_mode="HTML", read_timeout=600, write_timeout=600)
+            with open(filename, 'rb') as f:
+                await ctx.bot.send_video(video=f, supports_streaming=True, **kw)
+            db_log(uid, url, title, "pinterest", size, speed)
+            await status_msg.delete()
+
+# ─── اختيار التنسيق (لغير Pinterest) ─────
 async def on_format_choice(update, ctx):
     q = update.callback_query
     await q.answer()
     data = q.data.split("|")
     if len(data) < 3:
         return
-    qtype = data[1]  # v أو a
+    qtype = data[1]
     height = int(data[2])
     url = ctx.user_data.get("url")
     if not url:
         await q.edit_message_text("❌ الجلسة منتهية. أرسل الرابط مجدداً.")
         return
-
-    # بناء format string مرن
-    if qtype == "a":
-        fmt_str = "bestaudio/best"
-        desc = "صوت"
-    else:
-        # نطلب أفضل فيديو بارتفاع <= الارتفاع المختار + أفضل صوت متوافق
-        fmt_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
-        desc = f"{height}p"
-
+    fmt_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]" if qtype == "v" else "bestaudio/best"
+    desc = f"{height}p" if qtype == "v" else "صوت"
     await q.edit_message_text(f"⬇️ جارٍ تحميل {desc}...")
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt_str, qtype, q.message, q.from_user.id))
 
-# ─── دالة التحميل الرئيسية ─────────────
+# ─── التحميل العام (لغير Pinterest) ─────
 async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
     async with DOWNLOAD_SEM:
         loop = asyncio.get_running_loop()
@@ -301,6 +437,11 @@ async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
             return
 
         size = os.path.getsize(filename)
+        if size == 0:
+            await status_msg.edit_text("❌ الملف المُحمّل فارغ. قد يكون الفيديو محذوفًا أو خاصًا.")
+            cleanup(vid_id)
+            return
+
         speed = spd["kbs"]
         title = (info.get("title") or "")[:200]
 
@@ -348,7 +489,7 @@ def _locate_file(raw, vid_id, qtype):
                    key=lambda f: f.stat().st_size, reverse=True)
     return str(cands[0]) if cands else None
 
-# ─── Admin (اختصار) ───────────────────────────────
+# ─── Admin Dashboard (مختصر) ────────────
 async def cmd_admin(update, ctx):
     if update.effective_user.id != ADMIN_ID: await update.message.reply_text("⛔ للمشرف فقط."); return
     kb = [[InlineKeyboardButton("👥 المستخدمون", callback_data="a|users")],
@@ -380,34 +521,6 @@ async def on_admin(update, ctx):
     elif act == "clean":
         for f in DL_DIR.iterdir(): f.unlink()
         await q.edit_message_text("🗑 تم تنظيف المجلد المؤقت.")
-
-# ─── الأوامر الأساسية ────────────────────
-async def cmd_start(update, ctx):
-    db_user(update.effective_user)
-    msg = (f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n"
-           f"<b>{BOT_FULL_NAME}</b>\n\n"
-           "⚡ أرسل رابط الفيديو من أي منصة وسأحمّله بأقصى سرعة.\n"
-           "/about | /admin")
-    if update.effective_user.id == ADMIN_ID: msg += "\n🛡️ لوحة التحكم: /admin"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-async def cmd_about(update, ctx):
-    await update.message.reply_text(
-        f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\n"
-        "⚡ أسرع بوت تحميل على تلغرام.\n"
-        "✅ تجاوز حظر يوتيوب بذكاء\n"
-        "📦 تقسيم ذكي للملفات الكبيرة\n"
-        "🚀 aria2c + nightly yt-dlp\n"
-        "السرعة هي هويتنا.", parse_mode="HTML")
-
-async def on_link(update, ctx):
-    db_user(update.effective_user)
-    url = update.message.text.strip()
-    if not url.startswith("http"):
-        await update.message.reply_text("⚠️ أرسل رابطاً صالحاً.")
-        return
-    status_msg = await update.message.reply_text("🔍 جارٍ فحص التنسيقات المتاحة...")
-    await show_formats(update, ctx, url, status_msg)
 
 async def on_error(update, ctx):
     logger.error(f"[ERROR] {ctx.error}", exc_info=ctx.error)
