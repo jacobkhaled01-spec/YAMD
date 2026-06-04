@@ -1,4 +1,4 @@
-import asyncio, json, logging, math, os, re, shutil, sqlite3, subprocess, sys, time, traceback
+import asyncio, json, logging, math, os, random, re, shutil, sqlite3, subprocess, sys, time, traceback
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -23,13 +23,43 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or "0")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", "8080") or "8080")
 
+# ✅ دعم البروكسيات الدوارة
+PROXY_LIST_RAW = os.environ.get("PROXY_LIST", "").strip()
+PROXY_POOL: List[str] = []
+if PROXY_LIST_RAW:
+    for line in PROXY_LIST_RAW.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            # التنسيق: IP:PORT:USERNAME:PASSWORD
+            parts = line.split(":")
+            if len(parts) == 4:
+                ip, port, user, pwd = parts
+                proxy_url = f"http://{user}:{pwd}@{ip}:{port}"
+                PROXY_POOL.append(proxy_url)
+            elif len(parts) == 2:
+                # بدون مصادقة
+                ip, port = parts
+                proxy_url = f"http://{ip}:{port}"
+                PROXY_POOL.append(proxy_url)
+    if PROXY_POOL:
+        print(f"🌐 Loaded {len(PROXY_POOL)} proxies")
+    else:
+        print("⚠️ PROXY_LIST defined but no valid proxies parsed")
+else:
+    # الحفاظ على التوافق مع PROXY_URL القديم
+    SINGLE_PROXY = os.environ.get("PROXY_URL", "").strip()
+    if SINGLE_PROXY:
+        PROXY_POOL.append(SINGLE_PROXY)
+
+PO_TOKEN = os.environ.get("PO_TOKEN", "").strip()
+
 MAX_SIZE = 48 * 1024 * 1024
 DL_DIR = Path.home() / "yamd_dl"
 DL_DIR.mkdir(parents=True, exist_ok=True)
 
 DOWNLOAD_SEM = asyncio.Semaphore(2)
 
-YT_CLIENTS = ["web", "ios", "tv_embedded", "android", "mweb"]
+YT_CLIENTS = ["android_vr", "tv", "ios", "web", "mweb"]
 
 PINTEREST_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36"
 YT_UA = "com.google.android.youtube/20.10.38 (Linux; Android 14)"
@@ -150,10 +180,17 @@ async def cleanup_task():
         await asyncio.sleep(1800)
 
 # ═══════════════════════════════════════════════════════════
-# تحديث yt-dlp تلقائي
+# اختيار بروكسي عشوائي
+# ═══════════════════════════════════════════════════════════
+def get_random_proxy() -> Optional[str]:
+    if PROXY_POOL:
+        return random.choice(PROXY_POOL)
+    return None
+
+# ═══════════════════════════════════════════════════════════
+# تحديث yt-dlp
 # ═══════════════════════════════════════════════════════════
 async def _ensure_ytdlp_updated():
-    """تحديث yt-dlp إلى أحدث إصدار (nightly إن وجد)"""
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp",
@@ -161,31 +198,51 @@ async def _ensure_ytdlp_updated():
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode == 0:
-            logger.info("✅ yt-dlp updated successfully")
+            logger.info("✅ yt-dlp updated to nightly/pre-release")
         else:
-            logger.warning(f"⚠️ yt-dlp update warning: {stderr.decode()[:200]}")
+            proc2 = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "pip", "install", "-U", "yt-dlp",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await proc2.communicate()
+            logger.info("✅ yt-dlp updated to stable")
     except Exception as e:
         logger.warning(f"⚠️ Could not update yt-dlp: {e}")
 
 # ═══════════════════════════════════════════════════════════
-# استخراج التنسيقات (API محسّن + Fallback متعدد)
+# استخراج التنسيقات
 # ═══════════════════════════════════════════════════════════
+def _build_extractor_args(client: str) -> dict:
+    args = {
+        "youtube": {
+            "player_client": client,
+            "formats": "missing_pot",
+        }
+    }
+    if PO_TOKEN and client in ("web", "mweb", "ios", "android"):
+        args["youtube"]["po_token"] = f"{client}.player+{PO_TOKEN}"
+    if client in ("android_vr", "tv"):
+        args["youtube"]["player_skip"] = "webpage,configs,js"
+    return args
 
 def _api_extract(url: str, extractor_args: dict, extra_opts: dict = None) -> dict:
-    """استخراج معلومات الفيديو باستخدام yt-dlp API مع خيارات مرنة"""
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
         "extract_flat": False,
-        "ignore_no_formats_error": True,      # ✅ تجاهل خطأ "no formats"
-        "no_check_formats": True,             # ✅ لا تتحقق من صلاحية الروابط
+        "ignore_no_formats_error": True,
+        "no_check_formats": True,
         "skip_download": True,
         "geo_bypass": True,
         "cookiefile": COOKIE_FILE if COOKIE_FILE and os.path.exists(COOKIE_FILE) else None,
         "http_headers": {"User-Agent": YT_UA, **COMMON_HEADERS},
         "extractor_args": extractor_args,
     }
+    # ✅ بروكسي عشوائي
+    proxy = get_random_proxy()
+    if proxy:
+        opts["proxy"] = proxy
     if extra_opts:
         opts.update(extra_opts)
     
@@ -196,115 +253,65 @@ def _api_extract(url: str, extractor_args: dict, extra_opts: dict = None) -> dic
         raise RuntimeError(str(e)[:400])
 
 def extract_formats(url: str) -> Tuple[dict, list, Optional[dict]]:
-    """استراتيجية متعددة الطبقات لاستخراج تنسيقات YouTube"""
-    
     if not is_youtube(url):
-        # لغير يوتيوب: استخدام الإعدادات الافتراضية
         opts = {
             "quiet": True, "no_warnings": True, "extract_flat": False,
             "ignore_no_formats_error": True, "no_check_formats": True,
             "cookiefile": COOKIE_FILE if COOKIE_FILE and os.path.exists(COOKIE_FILE) else None,
         }
+        proxy = get_random_proxy()
+        if proxy:
+            opts["proxy"] = proxy
         if is_pinterest(url):
             opts["http_headers"] = {"User-Agent": PINTEREST_UA}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
         return parse_formats(info)
 
-    # ─── استراتيجيات YouTube المتدرجة ───
-    strategies = [
-        # الاستراتيجية 1: web + missing_pot (تجاوز PO Token المفقود)
-        {
-            "youtube": {
-                "player_client": "web",
-                "player_skip": "webpage,configs,js",
-                "formats": "missing_pot",
-            }
-        },
-        # الاستراتيجية 2: ios (غالبًا ما يعمل بدون PO Token)
-        {
-            "youtube": {
-                "player_client": "ios",
-                "formats": "missing_pot",
-            }
-        },
-        # الاستراتيجية 3: tv_embedded (للفيديوهات المحظورة/المتطلبة تسجيل دخول)
-        {
-            "youtube": {
-                "player_client": "tv_embedded",
-                "formats": "missing_pot",
-            }
-        },
-        # الاستراتيجية 4: android (مع تجاوز القيود)
-        {
-            "youtube": {
-                "player_client": "android",
-                "formats": "missing_pot",
-            }
-        },
-        # الاستراتيجية 5: mweb
-        {
-            "youtube": {
-                "player_client": "mweb",
-                "formats": "missing_pot",
-            }
-        },
-    ]
-
+    strategies = [_build_extractor_args(client) for client in YT_CLIENTS]
     last_err = ""
     for i, strat in enumerate(strategies, 1):
+        client_name = strat["youtube"]["player_client"]
         try:
+            logger.info(f"🔄 Trying YouTube client: {client_name}")
             info = _api_extract(url, strat)
-            # إذا نجح الاستخراج لكن بدون تنسيقات، نحاول الاستراتيجية التالية
             if not info.get("formats") and i < len(strategies):
-                last_err = f"Strategy {i}: no formats extracted"
+                last_err = f"Strategy {i} ({client_name}): no formats extracted"
                 continue
+            logger.info(f"✅ Success with client: {client_name}")
             return parse_formats(info)
         except Exception as e:
-            last_err = f"Strategy {i}: {str(e)}"
+            last_err = f"Strategy {i} ({client_name}): {str(e)}"
+            logger.warning(last_err)
             continue
 
-    # ─── Fallback الأخير: استخراج بحد أدنى من المعلومات ───
     try:
-        info = _api_extract(url, {"youtube": {"player_client": "web"}})
+        logger.info("🔄 Fallback: trying generic 'best' format")
+        info = _api_extract(url, {"youtube": {"player_client": "web"}}, {"format": "best"})
         return parse_formats(info)
     except Exception as e:
         raise RuntimeError(f"جميع الاستراتيجيات فشلت. آخر خطأ: {last_err}")
 
 def parse_formats(info: dict) -> Tuple[dict, list, Optional[dict]]:
     formats = info.get("formats") or info.get("entries", [{}])[0].get("formats") or []
-    
-    # ✅ إذا لم تكن هناك تنسيقات على الإطلاق، نُنشئ fallback واحدًا على الأقل
     if not formats:
         logger.warning("No formats found, creating minimal fallback")
         direct_url = info.get("url") or ""
         if direct_url:
-            return info, [{
-                "height": info.get("height") or 720,
-                "filesize": info.get("filesize") or 0,
-                "ext": info.get("ext", "mp4"),
-                "format_id": "fallback",
-                "acodec": "aac",
-                "vcodec": "avc1",
-                "url": direct_url,
-            }], None
+            return info, [{"height": info.get("height") or 720, "filesize": info.get("filesize") or 0, "ext": info.get("ext", "mp4"), "format_id": "fallback", "acodec": "aac", "vcodec": "avc1", "url": direct_url}], None
         else:
-            raise RuntimeError("YouTube لم يُرجع أي تنسيقات صالحة. حاول لاحقًا أو استخدم فيديو آخر.")
+            raise RuntimeError("YouTube لم يُرجع أي تنسيقات صالحة.")
     
     video_fmts = []
     audio_fmts = []
     seen = set()
-    
     for f in formats:
         try:
             fid = str(f.get("format_id") or "")
-            vc = f.get("vcodec")
-            ac = f.get("acodec")
-            h = f.get("height") or 0
-            w = f.get("width") or 0
+            vc = f.get("vcodec"); ac = f.get("acodec")
+            h = f.get("height") or 0; w = f.get("width") or 0
             ext = f.get("ext") or "mp4"
             sz = f.get("filesize") or f.get("filesize_approx") or 0
-            
             is_vid = h > 0 or (vc and vc != "none")
             if is_vid:
                 if not h and w:
@@ -319,20 +326,10 @@ def parse_formats(info: dict) -> Tuple[dict, list, Optional[dict]]:
                 key = (h, ext)
                 if key in seen: continue
                 seen.add(key)
-                video_fmts.append({
-                    "height": h, "filesize": sz, "ext": ext,
-                    "format_id": fid, "acodec": ac, "vcodec": vc
-                })
-            
+                video_fmts.append({"height": h, "filesize": sz, "ext": ext, "format_id": fid, "acodec": ac, "vcodec": vc})
             if ac and ac != "none" and (vc == "none" or not vc):
-                audio_fmts.append({
-                    "abr": f.get("abr", 0), "filesize": sz,
-                    "ext": ext, "format_id": fid
-                })
-        except Exception:
-            continue
-    
-    # fallback للـ format_note
+                audio_fmts.append({"abr": f.get("abr", 0), "filesize": sz, "ext": ext, "format_id": fid})
+        except: pass
     if not video_fmts:
         for f in formats:
             try:
@@ -340,19 +337,10 @@ def parse_formats(info: dict) -> Tuple[dict, list, Optional[dict]]:
                 m = re.search(r"(\d{3,4})p", note)
                 if m:
                     h = int(m.group(1))
-                    video_fmts.append({
-                        "height": h, "filesize": f.get("filesize", 0),
-                        "ext": f.get("ext", "mp4"),
-                        "format_id": str(f.get("format_id", "")),
-                        "acodec": f.get("acodec"),
-                        "vcodec": f.get("vcodec")
-                    })
-            except Exception:
-                continue
-    
+                    video_fmts.append({"height": h, "filesize": f.get("filesize", 0), "ext": f.get("ext", "mp4"), "format_id": str(f.get("format_id", "")), "acodec": f.get("acodec"), "vcodec": f.get("vcodec")})
+            except: pass
     video_fmts.sort(key=lambda x: x["height"], reverse=True)
     best_audio = max(audio_fmts, key=lambda x: x["abr"] or 0) if audio_fmts else None
-    
     return info, video_fmts, best_audio
 
 # ═══════════════════════════════════════════════════════════
@@ -371,11 +359,8 @@ async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
         loop = asyncio.get_running_loop()
         t0 = time.time()
         vid_id = f"v{uid}{int(t0)}"
-        
-        # ✅ إذا كان fmt_str فارغًا أو غير صالح، نستخدم fallback
         if not fmt_str or fmt_str == "None":
             fmt_str = "bestvideo+bestaudio/best" if qtype != "a" else "bestaudio/best"
-        
         spd = {"kbs":0,"bytes":0,"last_b":0,"last_t":t0}
         def hook(d):
             if d.get("status")!="downloading": return
@@ -396,6 +381,7 @@ async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
 
         is_yt = is_youtube(url)
         is_pin = is_pinterest(url)
+        proxy = get_random_proxy()
 
         opts = {
             "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
@@ -408,17 +394,18 @@ async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
             "merge_output_format": "mp4", "format": fmt_str,
             "progress_hooks": [hook], "geo_bypass": True,
             "skip_unavailable_fragments": True, "keep_fragments": False,
-            "ignore_no_formats_error": True,      # ✅ مهم جدًا
-            "no_check_formats": True,             # ✅ مهم جدًا
+            "ignore_no_formats_error": True,
+            "no_check_formats": True,
         }
+        if proxy:
+            opts["proxy"] = proxy
         if is_yt:
             opts["youtube_include_dash_manifest"] = True
             opts["extractor_args"] = {
-                "youtube": {
-                    "player_client": "web",
-                    "formats": "missing_pot",
-                }
+                "youtube": {"player_client": "android_vr", "formats": "missing_pot"}
             }
+            if PO_TOKEN:
+                opts["extractor_args"]["youtube"]["po_token"] = f"android_vr.player+{PO_TOKEN}"
         elif not is_pin and shutil.which("aria2c"):
             opts["external_downloader"] = "aria2c"
             opts["external_downloader_args"] = ["-x","8","-s","8","-k","1M"]
@@ -489,11 +476,16 @@ async def download_pinterest(ctx, chat_id, url, status_msg, uid):
         await safe_edit(status_msg, "🔍 استخراج رابط Pinterest...")
         cmd = ["yt-dlp","-g","--user-agent",PINTEREST_UA,"--no-check-certificate","--no-warnings","--quiet",url]
         if COOKIE_FILE and os.path.exists(COOKIE_FILE): cmd += ["--cookies", COOKIE_FILE]
+        proxy = get_random_proxy()
+        if proxy: cmd += ["--proxy", proxy]
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await proc.communicate()
         direct = stdout.decode(errors="ignore").strip().splitlines()[0].strip() if proc.returncode==0 and stdout else ""
         if not direct:
-            with yt_dlp.YoutubeDL({"quiet":True,"no_warnings":True,"http_headers":{"User-Agent":PINTEREST_UA}, **({"cookiefile":COOKIE_FILE} if COOKIE_FILE and os.path.exists(COOKIE_FILE) else {})}) as ydl:
+            pin_opts = {"quiet":True,"no_warnings":True,"http_headers":{"User-Agent":PINTEREST_UA}}
+            if COOKIE_FILE and os.path.exists(COOKIE_FILE): pin_opts["cookiefile"] = COOKIE_FILE
+            if proxy: pin_opts["proxy"] = proxy
+            with yt_dlp.YoutubeDL(pin_opts) as ydl:
                 info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
             for f in info.get("formats",[]):
                 u = f.get("url","")
@@ -533,7 +525,7 @@ async def download_pinterest(ctx, chat_id, url, status_msg, uid):
         await status_msg.edit_text(f"❌ فشل تحميل Pinterest: {str(e)[:250]}"); cleanup(vid_id)
 
 # ═══════════════════════════════════════════════════════════
-# واجهة المستخدم (مع التخزين المؤقت للفورمات)
+# واجهة المستخدم (اختصار)
 # ═══════════════════════════════════════════════════════════
 async def cmd_start(update, ctx):
     db_user(update.effective_user)
@@ -549,13 +541,10 @@ async def show_formats(update, ctx, url, status_msg):
     try:
         info, v_fmts, best_aud = await loop.run_in_executor(None, extract_formats, url)
     except Exception as e:
-        await status_msg.edit_text(f"❌ فشل استخراج التنسيقات: {str(e)[:250]}"); return
-
+        await status_msg.edit_text(f"❌ فشل استخراج التنسيقات: {str(e)[:400]}"); return
     ctx.user_data["url"] = url
     ctx.user_data["formats_cache"] = {v["format_id"]: v for v in v_fmts}
-    if best_aud:
-        ctx.user_data["formats_cache"][best_aud["format_id"]] = best_aud
-
+    if best_aud: ctx.user_data["formats_cache"][best_aud["format_id"]] = best_aud
     kb = []
     for v in v_fmts:
         sz = f" (~{fmt_size(v['filesize'])})" if v.get("filesize") else ""
@@ -565,9 +554,7 @@ async def show_formats(update, ctx, url, status_msg):
         sz = f" (~{fmt_size(best_aud['filesize'])})" if best_aud.get("filesize") else ""
         label = f"🔊 صوت MP3 {best_aud['ext']} {int(best_aud['abr'])}kbps{sz}"
         kb.append([InlineKeyboardButton(label, callback_data=f"dl|a|{best_aud['format_id']}")])
-
-    if not kb:
-        await status_msg.edit_text("❌ لا توجد تنسيقات."); return
+    if not kb: await status_msg.edit_text("❌ لا توجد تنسيقات."); return
     await status_msg.edit_text(f"🎞️ <b>{(info.get('title') or 'فيديو')[:200]}</b>\nاختر التنسيق:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 async def on_link(update, ctx):
@@ -589,38 +576,36 @@ async def on_format_choice(update, ctx):
     url = ctx.user_data.get("url")
     cache = ctx.user_data.get("formats_cache", {})
     selected = cache.get(fid)
-
-    if not selected or not url:
-        await q.edit_message_text("❌ الجلسة منتهية. أرسل الرابط من جديد."); return
-
-    # ✅ بناء format string بذكاء مع fallback قوي
+    if not selected or not url: await q.edit_message_text("❌ الجلسة منتهية."); return
     has_audio = selected.get("acodec") not in [None, "none", "None"]
     has_video = selected.get("vcodec") not in [None, "none", "None"]
-
-    if qtype == "a":
-        fmt_str = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
-    else:
-        if has_video and has_audio:
-            fmt_str = fid
-        elif has_video:
-            fmt_str = f"{fid}+bestaudio[ext=m4a]/{fid}+bestaudio/bestvideo+bestaudio/best"
-        else:
-            fmt_str = "bestvideo+bestaudio/best"
-
+    if qtype == "a": fmt_str = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
+    elif has_video and has_audio: fmt_str = fid
+    elif has_video: fmt_str = f"{fid}+bestaudio[ext=m4a]/{fid}+bestaudio/bestvideo+bestaudio/best"
+    else: fmt_str = "bestvideo+bestaudio/best"
     desc = "صوت" if qtype == "a" else "فيديو"
     await q.edit_message_text(f"⬇️ جارٍ تحميل {desc}...")
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt_str, qtype, q.message, q.from_user.id))
 
 # ═══════════════════════════════════════════════════════════
-# لوحة الإدارة
+# لوحة الإدارة (اختصار)
 # ═══════════════════════════════════════════════════════════
 async def cmd_admin(update, ctx):
     if update.effective_user.id != ADMIN_ID: await update.message.reply_text("⛔ للمشرف فقط."); return
+    ytdlp_ver = "❌"
+    try: ytdlp_ver = yt_dlp.version.__version__
+    except: pass
     kb = [[InlineKeyboardButton("👥 المستخدمون", callback_data="a|users")],
           [InlineKeyboardButton("📜 آخر التحميلات", callback_data="a|dls")],
           [InlineKeyboardButton("📊 إحصائيات", callback_data="a|stats")],
           [InlineKeyboardButton("🗑 تنظيف مؤقت", callback_data="a|clean")]]
-    await update.message.reply_text(f"🛡️ <b>YAMD Admin</b>\naria2: {'✅' if shutil.which('aria2c') else '❌'} | ffmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}\n🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    await update.message.reply_text(
+        f"🛡️ <b>YAMD Admin</b>\nyt-dlp: <code>{ytdlp_ver}</code>\n"
+        f"aria2: {'✅' if shutil.which('aria2c') else '❌'} | ffmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}\n"
+        f"🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}\n"
+        f"🌐 Proxies: {len(PROXY_POOL)}\n"
+        f"🔑 PO Token: {'✅' if PO_TOKEN else '❌'}",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 async def on_admin(update, ctx):
     q = update.callback_query
@@ -638,7 +623,7 @@ async def on_admin(update, ctx):
         await q.edit_message_text(t or "لا توجد.", parse_mode="HTML")
     elif act == "stats":
         uc = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]; dc = db.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]; avg = db.execute("SELECT AVG(speed) FROM downloads").fetchone()[0] or 0
-        await q.edit_message_text(f"📊 <b>YAMD Stats</b>\n\n👥 {uc} مستخدم\n📥 {dc} تحميلة\n⚡ متوسط: {fmt_speed(avg)}\naria2: {'✅' if shutil.which('aria2c') else '❌'}\n🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}", parse_mode="HTML")
+        await q.edit_message_text(f"📊 <b>YAMD Stats</b>\n\n👥 {uc} مستخدم\n📥 {dc} تحميلة\n⚡ متوسط: {fmt_speed(avg)}\naria2: {'✅' if shutil.which('aria2c') else '❌'}\n🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}\n🌐 Proxies: {len(PROXY_POOL)}\n🔑 PO Token: {'✅' if PO_TOKEN else '❌'}", parse_mode="HTML")
     elif act == "clean":
         for f in DL_DIR.iterdir():
             try:
@@ -653,10 +638,7 @@ async def on_error(update, ctx): logger.error(f"[ERROR] {ctx.error}", exc_info=c
 # ═══════════════════════════════════════════════════════════
 async def main():
     if not BOT_TOKEN or not WEBHOOK_URL: raise RuntimeError("Missing BOT_TOKEN or WEBHOOK_URL")
-    
-    # ✅ تحديث yt-dlp قبل البدء
     await _ensure_ytdlp_updated()
-    
     tmp = Application.builder().token(BOT_TOKEN).build()
     await tmp.bot.delete_webhook(drop_pending_updates=True)
     logger.info("🧹 Old webhook removed")
