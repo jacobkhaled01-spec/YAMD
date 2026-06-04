@@ -124,39 +124,21 @@ async def cleanup_task():
             except: pass
         await asyncio.sleep(1800)
 
-# ─── معالجة Pinterest ────────────────
+# ─── استخراج التنسيقات العامة (تدعم Pinterest) ────
 PINTEREST_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36"
 
-def build_pinterest_opts(fmt, vid_id):
-    opts = {
-        "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
-        "quiet": True, "no_warnings": True, "noprogress": True,
-        "socket_timeout": 120,
-        "retries": 15, "fragment_retries": 15,
-        "no_check_certificate": True,
-        "continuedl": False,
-        "concurrent_fragment_downloads": 0,
-        "http_chunk_size": 4 * 1024 * 1024,
-        "buffersize": 1024 * 1024,
-        "no_mtime": True, "no_playlist": True,
-        "prefer_ffmpeg": True,
-        "merge_output_format": "mp4",
-        "format": fmt,
-        "http_headers": {"User-Agent": PINTEREST_UA, "Accept-Language": "en-US,en;q=0.9"},
-    }
-    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
-        opts["cookiefile"] = COOKIE_FILE
-    return opts
-
-# ─── استخراج التنسيقات (لغير Pinterest) ────
 def extract_formats(url):
+    """تُرجع (info_dict, video_formats_list, best_audio_dict) أو ترمي استثناء"""
+    is_pin = "pin.it" in url or "pinterest" in url.lower()
     opts = {
-        "quiet": True, "no_warnings": True, "extract_flat": False,
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
         "cookiefile": COOKIE_FILE if COOKIE_FILE and os.path.exists(COOKIE_FILE) else None,
         "http_headers": {
-            "User-Agent": "com.google.android.youtube/20.10.38 (Linux; Android 14)",
+            "User-Agent": PINTEREST_UA if is_pin else "com.google.android.youtube/20.10.38 (Linux; Android 14)",
             "Accept-Language": "en-US,en;q=0.9",
-        } if "youtube.com" in url or "youtu.be" in url else {},
+        },
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -241,125 +223,34 @@ async def on_link(update, ctx):
         await update.message.reply_text("⚠️ أرسل رابطاً صالحاً.")
         return
 
-    # معالجة خاصة لـ Pinterest: تحميل مباشر بدون قائمة التنسيقات
-    if "pin.it" in url or "pinterest" in url.lower():
-        status = await update.message.reply_text("⬇️ جارٍ تحميل فيديو Pinterest...")
-        fmt_str = "best"
-        asyncio.create_task(download_pinterest(ctx, update.message.chat_id, url, status, update.effective_user.id))
-        return
-
-    # باقي المنصات: عرض التنسيقات
+    # عرض التنسيقات لجميع المنصات بما فيها Pinterest
     status_msg = await update.message.reply_text("🔍 جارٍ فحص التنسيقات...")
     await show_formats(update, ctx, url, status_msg)
 
-# ─── تحميل Pinterest ────────────────────
-async def download_pinterest(ctx, chat_id, url, status_msg, uid):
-    async with DOWNLOAD_SEM:
-        loop = asyncio.get_running_loop()
-        vid_id = f"v{uid}{int(time.time())}"
-        t0 = time.time()
-        spd = {"kbs":0,"bytes":0,"last_b":0,"last_t":t0}
-        def hook(d):
-            if d.get("status")!="downloading": return
-            got = d.get("downloaded_bytes") or 0
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            now = time.time()
-            dt = now - spd["last_t"]
-            if dt >= 1:
-                spd["kbs"] = max(0, (got - spd["last_b"]) / dt / 1024)
-                spd["last_b"] = got; spd["last_t"] = now
-            spd["bytes"] = got
-            kbs = spd["kbs"]
-            pct = f"{got/total*100:.0f}%" if total else "…"
-            eta = "?"
-            if kbs>0 and total:
-                s = (total - got) / 1024 / kbs
-                eta = f"{int(s//60)}د{int(s%60)}ث" if s>=60 else f"{int(s)}ث"
-            asyncio.run_coroutine_threadsafe(
-                safe_edit(status_msg, f"⬇️ جارٍ التحميل...\n⚡ {fmt_speed(kbs)}\n📦 {fmt_size(got)}/{fmt_size(total)} [{pct}]  ETA: {eta}"),
-                loop)
-
-        opts = build_pinterest_opts("best", vid_id)
-        opts["progress_hooks"] = [hook]
-
-        filename = None
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-                raw = ydl.prepare_filename(info)
-            # Pinterest قد يُخرج ملفًا بصيغة .mp4 أو .unknown، نبحث عنه
-            for ext in ["mp4", "mkv", "webm", ""]:
-                candidate = os.path.splitext(raw)[0] + (f".{ext}" if ext else "")
-                if os.path.exists(candidate):
-                    filename = candidate
-                    break
-            if not filename:
-                filename = find_file(vid_id)
-            if not filename:
-                await status_msg.edit_text("❌ الملف غير موجود بعد التحميل.")
-                return
-            size = os.path.getsize(filename)
-            if size == 0:
-                await status_msg.edit_text("❌ الملف المُحمّل فارغ. قد يكون الفيديو محذوفًا أو خاصًا.")
-                cleanup(vid_id)
-                return
-        except Exception as e:
-            await status_msg.edit_text(f"❌ {str(e)[:200]}")
-            cleanup(vid_id)
-            return
-
-        title = (info.get("title") or "")[:200]
-        speed = spd["kbs"]
-        if size > MAX_SIZE:
-            await safe_edit(status_msg, "📦 تقسيم...")
-            parts = await loop.run_in_executor(None, lambda: split_video(filename, MAX_SIZE))
-            if not parts:
-                await status_msg.edit_text("❌ فشل التقسيم.")
-                cleanup(vid_id)
-                return
-            total = len(parts)
-            base_cap = f"<b>{title}</b>\n👤 {info.get('uploader','')}\n📥 {BOT_NAME}\n"
-            for i, p in enumerate(parts, 1):
-                ps = os.path.getsize(p)
-                with open(p, "rb") as vf:
-                    await ctx.bot.send_video(chat_id=chat_id, video=vf,
-                                             caption=f"{base_cap}📦 جزء {i}/{total} | {fmt_size(ps)}",
-                                             parse_mode="HTML", read_timeout=600, write_timeout=600,
-                                             supports_streaming=True)
-                os.remove(p)
-            await safe_edit(status_msg, "✅ تم.")
-            db_log(uid, url, title, "pinterest", size, speed)
-            await asyncio.sleep(2)
-            await status_msg.delete()
-        else:
-            elapsed = int(time.time() - t0)
-            await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}... ⏱ {elapsed}ث")
-            caption = f"<b>{title}</b>\n👤 {info.get('uploader','')}\n⚡ {fmt_speed(speed)} | ⏱ {elapsed}ث\n📥 {BOT_NAME}"
-            kw = dict(chat_id=chat_id, caption=caption, parse_mode="HTML", read_timeout=600, write_timeout=600)
-            with open(filename, 'rb') as f:
-                await ctx.bot.send_video(video=f, supports_streaming=True, **kw)
-            db_log(uid, url, title, "pinterest", size, speed)
-            await status_msg.delete()
-
-# ─── اختيار التنسيق (لغير Pinterest) ─────
+# ─── اختيار التنسيق والتحميل ─────────────
 async def on_format_choice(update, ctx):
     q = update.callback_query
     await q.answer()
     data = q.data.split("|")
     if len(data) < 3:
         return
-    qtype = data[1]
+    qtype = data[1]  # v أو a
     height = int(data[2])
     url = ctx.user_data.get("url")
     if not url:
         await q.edit_message_text("❌ الجلسة منتهية. أرسل الرابط مجدداً.")
         return
-    fmt_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]" if qtype == "v" else "bestaudio/best"
-    desc = f"{height}p" if qtype == "v" else "صوت"
+
+    if qtype == "a":
+        fmt_str = "bestaudio/best"
+        desc = "صوت"
+    else:
+        fmt_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
+        desc = f"{height}p"
+
     await q.edit_message_text(f"⬇️ جارٍ تحميل {desc}...")
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt_str, qtype, q.message, q.from_user.id))
 
-# ─── التحميل العام (لغير Pinterest) ─────
 async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
     async with DOWNLOAD_SEM:
         loop = asyncio.get_running_loop()
@@ -412,9 +303,9 @@ async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
             opts["external_downloader_args"] = ["-x", "8", "-s", "8", "-k", "1M"]
         if COOKIE_FILE and os.path.exists(COOKIE_FILE):
             opts["cookiefile"] = COOKIE_FILE
-        if is_youtube:
+        if is_youtube or is_pin:
             opts["http_headers"] = {
-                "User-Agent": "com.google.android.youtube/20.10.38 (Linux; Android 14)",
+                "User-Agent": PINTEREST_UA if is_pin else "com.google.android.youtube/20.10.38 (Linux; Android 14)",
                 "Accept-Language": "en-US,en;q=0.9",
             }
         if qtype == "a":
