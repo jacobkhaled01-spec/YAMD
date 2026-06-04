@@ -1,16 +1,4 @@
-import asyncio
-import json
-import logging
-import math
-import os
-import random
-import re
-import shutil
-import sqlite3
-import subprocess
-import sys
-import time
-import traceback
+import asyncio, json, logging, math, os, re, shutil, sqlite3, subprocess, sys, time, traceback
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -19,18 +7,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+    Application, CallbackQueryHandler, CommandHandler,
+    ContextTypes, MessageHandler, filters,
 )
 import yt_dlp
 
-# =========================
-# Configuration
-# =========================
+# ═══════════════════════════════════════════════════════════
+# الإعدادات الأساسية
+# ═══════════════════════════════════════════════════════════
 BOT_NAME = "⚡ YAMD – Ultra Speed"
 BOT_FULL_NAME = "YAAQOB ALMAHAJERI MEDIA DOWNLOADER"
 
@@ -44,18 +28,18 @@ DL_DIR = Path.home() / "yamd_dl"
 DL_DIR.mkdir(parents=True, exist_ok=True)
 
 DOWNLOAD_SEM = asyncio.Semaphore(2)
-YT_CLIENTS = ["android", "web", "ios", "mweb", "tv"]
 
-PINTEREST_UA = (
-    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36"
-)
+# قائمة العملاء التي سنحاول عبرهم بالترتيب (CLI fallback)
+YT_CLIENTS = ["android", "tv", "web", "ios", "mweb"]
+
+# وكلاء المستخدم
+PINTEREST_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36"
 YT_UA = "com.google.android.youtube/20.10.38 (Linux; Android 14)"
 COMMON_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
 
-# =========================
-# Cookies
-# =========================
+# ═══════════════════════════════════════════════════════════
+# الكوكيز (نفس الآلية السابقة)
+# ═══════════════════════════════════════════════════════════
 COOKIE_FILE: Optional[str] = None
 COOKIE_TMP = "/tmp/yamd_cookies.txt"
 COOKIES_TEXT = os.environ.get("COOKIES_TEXT", "")
@@ -70,7 +54,6 @@ def _load_cookies() -> None:
         COOKIE_FILE = COOKIE_TMP
         print("🍪 Cookies loaded from COOKIES_TEXT")
         return
-
     if os.path.exists(SECRET_FILE):
         try:
             shutil.copy2(SECRET_FILE, COOKIE_TMP)
@@ -79,14 +62,13 @@ def _load_cookies() -> None:
             return
         except Exception as e:
             print(f"⚠️ Failed to copy secret file: {e}")
-
     print("⚠️ NO COOKIES FOUND – YouTube may require sign-in")
 
 _load_cookies()
 
-# =========================
-# Logging
-# =========================
+# ═══════════════════════════════════════════════════════════
+# السجلات
+# ═══════════════════════════════════════════════════════════
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -98,431 +80,209 @@ logger.setLevel(logging.INFO)
 for lib in ("httpx", "httpcore", "telegram", "hpack", "asyncio", "aiohttp"):
     logging.getLogger(lib).setLevel(logging.ERROR)
 
-# =========================
-# Database
-# =========================
+# ═══════════════════════════════════════════════════════════
+# قاعدة البيانات (اختصار)
+# ═══════════════════════════════════════════════════════════
 db = sqlite3.connect("yamd.db", check_same_thread=False)
 db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
 
 def _setup_db() -> None:
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users(
-            uid INTEGER PRIMARY KEY,
-            username TEXT,
-            fname TEXT,
-            seen TEXT,
-            active TEXT,
-            cnt INTEGER DEFAULT 0
-        )
-        """
-    )
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS downloads(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER,
-            url TEXT,
-            title TEXT,
-            quality TEXT,
-            size INTEGER,
-            speed REAL,
-            ts TEXT
-        )
-        """
-    )
+    db.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY, username TEXT, fname TEXT, seen TEXT, active TEXT, cnt INTEGER DEFAULT 0)")
+    db.execute("CREATE TABLE IF NOT EXISTS downloads(id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER, url TEXT, title TEXT, quality TEXT, size INTEGER, speed REAL, ts TEXT)")
     db.commit()
-
 _setup_db()
 
 def db_user(u) -> None:
     now = datetime.now().isoformat()
-    db.execute(
-        """
-        INSERT INTO users(uid,username,fname,seen,active)
-        VALUES(?,?,?,?,?)
-        ON CONFLICT(uid) DO UPDATE SET
-            active=excluded.active,
-            username=COALESCE(excluded.username,username),
-            fname=COALESCE(excluded.fname,fname),
-            seen=excluded.seen
-        """,
-        (u.id, u.username or "", u.first_name or "", now, now),
-    )
+    db.execute("INSERT INTO users(uid,username,fname,seen,active) VALUES(?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET active=excluded.active, username=COALESCE(excluded.username,username), fname=COALESCE(excluded.fname,fname), seen=excluded.seen", (u.id, u.username or "", u.first_name or "", now, now))
     db.commit()
 
-def db_log(uid: int, url: str, title: str, qkey: str, size: int, speed: float) -> None:
-    db.execute(
-        "INSERT INTO downloads(uid,url,title,quality,size,speed,ts) VALUES(?,?,?,?,?,?,?)",
-        (uid, url, title, qkey, size, round(speed, 1), datetime.now().isoformat()),
-    )
+def db_log(uid, url, title, qkey, size, speed):
+    db.execute("INSERT INTO downloads(uid,url,title,quality,size,speed,ts) VALUES(?,?,?,?,?,?,?)", (uid, url, title, qkey, size, round(speed,1), datetime.now().isoformat()))
     db.execute("UPDATE users SET cnt=cnt+1 WHERE uid=?", (uid,))
     db.commit()
 
-# =========================
-# Helpers
-# =========================
+# ═══════════════════════════════════════════════════════════
+# أدوات مساعدة
+# ═══════════════════════════════════════════════════════════
 _edit_ts = defaultdict(float)
+def fmt_size(b): return f"{b/1024**3:.1f}GB" if b >= 1024**3 else f"{b/1024**2:.1f}MB" if b else "?"
+def fmt_speed(kbs): return f"{kbs/1024:.1f}MB/s" if kbs and kbs >= 1024 else f"{kbs:.0f}KB/s" if kbs else "?"
+async def safe_edit(msg, text, markup=None):
+    if time.time() - _edit_ts[msg.message_id] < 2: return
+    try: await msg.edit_text(text, reply_markup=markup); _edit_ts[msg.message_id] = time.time()
+    except: pass
 
-def fmt_size(b: int) -> str:
-    if b is None or b <= 0:
-        return "?"
-    if b >= 1024**3:
-        return f"{b / 1024**3:.1f}GB"
-    return f"{b / 1024**2:.1f}MB"
+def is_youtube(url): return "youtube.com" in url.lower() or "youtu.be" in url.lower()
+def is_pinterest(url): return "pin.it" in url.lower() or "pinterest" in url.lower()
 
-def fmt_speed(kbs: float) -> str:
-    if kbs is None or kbs <= 0:
-        return "?"
-    if kbs >= 1024:
-        return f"{kbs / 1024:.1f}MB/s"
-    return f"{kbs:.0f}KB/s"
-
-async def safe_edit(msg, text: str, markup=None) -> None:
-    try:
-        if time.time() - _edit_ts[msg.message_id] < 2:
-            return
-        await msg.edit_text(text, reply_markup=markup)
-        _edit_ts[msg.message_id] = time.time()
-    except Exception:
-        pass
-
-def is_youtube_url(url: str) -> bool:
-    u = url.lower()
-    return "youtube.com" in u or "youtu.be" in u
-
-def is_pinterest_url(url: str) -> bool:
-    u = url.lower()
-    return "pin.it" in u or "pinterest" in u
-
-def cleanup(prefix: str) -> None:
+def cleanup(prefix):
     for f in DL_DIR.glob(f"{prefix}*"):
-        try:
-            if f.is_file():
-                f.unlink()
-        except Exception:
-            pass
+        try: f.unlink() if f.is_file() else None
+        except: pass
 
-def find_file(prefix: str) -> Optional[str]:
-    cands = sorted(
-        [f for f in DL_DIR.glob(f"{prefix}*") if f.is_file()],
-        key=lambda f: f.stat().st_size,
-        reverse=True,
-    )
+def find_file(prefix):
+    cands = sorted([f for f in DL_DIR.glob(f"{prefix}*") if f.is_file()], key=lambda f: f.stat().st_size, reverse=True)
     return str(cands[0]) if cands else None
 
-def split_video(filepath: str, max_part_size: int = MAX_SIZE) -> Optional[List[str]]:
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        return None
-
-    base = os.path.splitext(filepath)[0]
-    pattern = f"{base}_part%03d.mp4"
-
+def split_video(filepath, max_part_size=MAX_SIZE):
+    if not shutil.which("ffmpeg"): return None
+    base = os.path.splitext(filepath)[0]; pattern = f"{base}_part%03d.mp4"
     try:
-        dur_raw = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "quiet",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "csv=p=0",
-                filepath,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        ).stdout.strip()
-        dur = float(dur_raw)
-    except Exception:
-        return None
-
-    if dur <= 0:
-        return None
-
-    total_size = os.path.getsize(filepath)
-    if total_size <= max_part_size:
-        return [filepath]
-
-    parts_count = math.ceil(total_size / max_part_size)
-    seg = max(1, math.ceil(dur / parts_count) + 1)
-
+        dur = float(subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration","-of","csv=p=0",filepath], capture_output=True,text=True,timeout=60).stdout.strip())
+    except: return None
+    if dur <= 0: return None
+    total = os.path.getsize(filepath)
+    if total <= max_part_size: return [filepath]
+    parts = math.ceil(total / max_part_size)
+    seg = math.ceil(dur / parts) + 1
     try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                filepath,
-                "-c",
-                "copy",
-                "-map",
-                "0",
-                "-f",
-                "segment",
-                "-segment_time",
-                str(seg),
-                "-reset_timestamps",
-                "1",
-                "-segment_format",
-                "mp4",
-                pattern,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-    except Exception:
-        return None
-
+        subprocess.run(["ffmpeg","-y","-i",filepath,"-c","copy","-map","0","-f","segment","-segment_time",str(seg),"-reset_timestamps","1","-segment_format","mp4",pattern], check=True, capture_output=True, text=True, timeout=600)
+    except: return None
     return [str(p) for p in sorted(Path(base).parent.glob(f"{Path(filepath).stem}_part*.mp4"))]
 
-async def cleanup_task() -> None:
+async def cleanup_task():
     while True:
         now = time.time()
         for f in DL_DIR.glob("*"):
             try:
-                if f.is_file() and now - f.stat().st_mtime > 3600:
-                    f.unlink()
-            except Exception:
-                pass
+                if f.is_file() and now - f.stat().st_mtime > 3600: f.unlink()
+            except: pass
         await asyncio.sleep(1800)
 
-# =========================
-# Extraction
-# =========================
-def _yt_cli_json(url: str, client: str) -> Dict[str, Any]:
-    cmd = [
-        "yt-dlp",
-        "--dump-single-json",
-        "--no-warnings",
-        "--quiet",
-        "--extractor-args",
-        f"youtube:player_client={client}",
-        url,
-    ]
+# ═══════════════════════════════════════════════════════════
+# استخراج التنسيقات باستخدام CLI حصراً (مع fallback للعملاء)
+# ═══════════════════════════════════════════════════════════
+def _cli_json(url: str, client: str) -> dict:
+    cmd = ["yt-dlp", "-J", "--no-warnings", "--quiet", "--extractor-args", f"youtube:player_client={client}", url]
     if COOKIE_FILE and os.path.exists(COOKIE_FILE):
         cmd += ["--cookies", COOKIE_FILE]
-
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or "yt-dlp failed")[:400])
-
+        raise RuntimeError((proc.stderr or proc.stdout or "CLI failed")[:400])
     return json.loads(proc.stdout)
 
-def _ydl_info(url: str) -> Dict[str, Any]:
-    opts: Dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
-    }
-    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
-        opts["cookiefile"] = COOKIE_FILE
-
-    if is_youtube_url(url):
-        opts["http_headers"] = {"User-Agent": YT_UA, **COMMON_HEADERS}
-        opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
-    elif is_pinterest_url(url):
-        opts["http_headers"] = {"User-Agent": PINTEREST_UA, **COMMON_HEADERS}
-
+def extract_formats(url: str) -> Tuple[dict, list, Optional[dict]]:
+    if is_youtube(url):
+        last_err = ""
+        for client in YT_CLIENTS:
+            try:
+                info = _cli_json(url, client)
+                return parse_formats(info)
+            except Exception as e:
+                last_err = str(e)
+                continue
+        raise RuntimeError(f"كل العملاء فشلوا: {last_err}")
+    # لغير يوتيوب: نستخدم API العادي (مرة واحدة)
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": False}
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE): opts["cookiefile"] = COOKIE_FILE
+    if is_pinterest(url): opts["http_headers"] = {"User-Agent": PINTEREST_UA}
     with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
+        info = ydl.extract_info(url, download=False)
+    return parse_formats(info)
 
-# ✅ دالة parse_formats المحسّنة
-def parse_formats(info: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def parse_formats(info: dict) -> Tuple[dict, list, Optional[dict]]:
     formats = info.get("formats", []) or []
-    video_fmts: List[Dict[str, Any]] = []
-    audio_fmts: List[Dict[str, Any]] = []
+    video_fmts = []
+    audio_fmts = []
     seen = set()
-
     for f in formats:
         try:
-            format_id = str(f.get("format_id") or "")
-            vcodec = f.get("vcodec")
-            acodec = f.get("acodec")
-            height = f.get("height") or 0
-            width = f.get("width") or 0
+            fid = str(f.get("format_id") or "")
+            vc = f.get("vcodec"); ac = f.get("acodec")
+            h = f.get("height") or 0; w = f.get("width") or 0
             ext = f.get("ext") or "mp4"
-            filesize = f.get("filesize") or f.get("filesize_approx") or 0
-            protocol = f.get("protocol") or ""
-
-            # --- VIDEO ---
-            is_video = height > 0 or (vcodec and vcodec != "none")
-            if is_video:
-                if not height and width:
-                    if width >= 3840: height = 2160
-                    elif width >= 2560: height = 1440
-                    elif width >= 1920: height = 1080
-                    elif width >= 1280: height = 720
-                    elif width >= 854: height = 480
-                    elif width >= 640: height = 360
-                    else: height = 240
-                if height <= 0:
-                    continue
-
-                key = (height, ext)
-                if key in seen:
-                    continue
+            sz = f.get("filesize") or f.get("filesize_approx") or 0
+            # فيديو
+            is_vid = h > 0 or (vc and vc != "none")
+            if is_vid:
+                if not h and w:
+                    if w >= 3840: h = 2160
+                    elif w >= 2560: h = 1440
+                    elif w >= 1920: h = 1080
+                    elif w >= 1280: h = 720
+                    elif w >= 854: h = 480
+                    elif w >= 640: h = 360
+                    else: h = 240
+                if h <= 0: continue
+                key = (h, ext)
+                if key in seen: continue
                 seen.add(key)
-
-                video_fmts.append({
-                    "height": height,
-                    "filesize": filesize,
-                    "ext": ext,
-                    "format_id": format_id,
-                    "protocol": protocol,
-                })
-
-            # --- AUDIO ---
-            is_audio = acodec and acodec != "none" and (vcodec == "none" or not vcodec)
-            if is_audio:
-                abr = int(f.get("abr") or 0)
-                audio_fmts.append({
-                    "abr": abr,
-                    "filesize": filesize,
-                    "ext": ext,
-                    "format_id": format_id,
-                })
-        except Exception:
-            continue
-
-    # Fallback: استخراج من format_note إذا لم نجد شيء
+                video_fmts.append({"height": h, "filesize": sz, "ext": ext, "format_id": fid})
+            # صوت
+            if ac and ac != "none" and (vc == "none" or not vc):
+                audio_fmts.append({"abr": f.get("abr", 0), "filesize": sz, "ext": ext, "format_id": fid})
+        except: pass
+    # fallback من format_note
     if not video_fmts:
         for f in formats:
             try:
-                format_note = str(f.get("format_note") or "")
-                ext = f.get("ext") or "mp4"
-                match = re.search(r"(\d{3,4})p", format_note)
-                if match:
-                    height = int(match.group(1))
-                    video_fmts.append({
-                        "height": height,
-                        "filesize": f.get("filesize") or 0,
-                        "ext": ext,
-                        "format_id": str(f.get("format_id") or ""),
-                        "protocol": f.get("protocol") or "",
-                    })
-            except Exception:
-                pass
-
+                note = str(f.get("format_note") or "")
+                m = re.search(r"(\d{3,4})p", note)
+                if m:
+                    h = int(m.group(1))
+                    video_fmts.append({"height": h, "filesize": f.get("filesize",0), "ext": f.get("ext","mp4"), "format_id": str(f.get("format_id",""))})
+            except: pass
     video_fmts.sort(key=lambda x: x["height"], reverse=True)
     best_audio = max(audio_fmts, key=lambda x: x["abr"] or 0) if audio_fmts else None
     return info, video_fmts, best_audio
 
-def extract_formats(url: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    if is_youtube_url(url):
-        last_error: Optional[str] = None
-
-        try:
-            info = _ydl_info(url)
-            return parse_formats(info)
-        except Exception as e:
-            last_error = str(e)
-
-        for client in YT_CLIENTS:
-            try:
-                info = _yt_cli_json(url, client)
-                return parse_formats(info)
-            except Exception as e:
-                last_error = str(e)
-                continue
-
-        raise RuntimeError(f"فشل استخراج تنسيقات YouTube: {last_error or 'unknown error'}")
-
-    info = _ydl_info(url)
-    return parse_formats(info)
-
-# =========================
-# Download targets
-# =========================
-def _locate_file(raw: str, vid_id: str, qtype: str) -> Optional[str]:
-    ext_list = ["mp3"] if qtype == "a" else ["mp4", "mkv", "webm", ""]
-    for ext in ext_list:
-        candidate = os.path.splitext(raw)[0] + (f".{ext}" if ext else "")
-        if os.path.exists(candidate):
-            return candidate
-
-    cands = sorted(
-        [f for f in DL_DIR.glob(f"{vid_id}*") if f.is_file()],
-        key=lambda f: f.stat().st_size,
-        reverse=True,
-    )
+# ═══════════════════════════════════════════════════════════
+# التحميل العام (يدعم يوتيوب بتعطيل aria2c وباقي المنصات)
+# ═══════════════════════════════════════════════════════════
+def _locate_file(raw, vid_id, qtype):
+    exts = ["mp3"] if qtype=="a" else ["mp4","mkv","webm",""]
+    for e in exts:
+        p = os.path.splitext(raw)[0] + (f".{e}" if e else "")
+        if os.path.exists(p): return p
+    cands = sorted([f for f in DL_DIR.glob(f"{vid_id}*") if f.is_file()], key=lambda f: f.stat().st_size, reverse=True)
     return str(cands[0]) if cands else None
 
-async def do_download(
-    ctx: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    url: str,
-    fmt_str: str,
-    qtype: str,
-    status_msg,
-    uid: int,
-) -> None:
+async def do_download(ctx, chat_id, url, fmt_str, qtype, status_msg, uid):
     async with DOWNLOAD_SEM:
         loop = asyncio.get_running_loop()
-        t0 = time.time()
-        vid_id = f"v{uid}{int(t0)}"
-        spd = {"kbs": 0.0, "bytes": 0, "last_b": 0, "last_t": t0}
-
-        def hook(d: Dict[str, Any]) -> None:
-            if d.get("status") != "downloading":
-                return
-            got = int(d.get("downloaded_bytes") or 0)
-            total = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
-            now = time.time()
-            dt = now - spd["last_t"]
+        t0 = time.time(); vid_id = f"v{uid}{int(t0)}"
+        spd = {"kbs":0,"bytes":0,"last_b":0,"last_t":t0}
+        def hook(d):
+            if d.get("status")!="downloading": return
+            got = d.get("downloaded_bytes",0) or 0
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            now = time.time(); dt = now - spd["last_t"]
             if dt >= 1:
-                spd["kbs"] = max(0.0, (got - spd["last_b"]) / dt / 1024)
-                spd["last_b"] = got
-                spd["last_t"] = now
+                spd["kbs"] = max(0, (got - spd["last_b"])/dt/1024)
+                spd["last_b"] = got; spd["last_t"] = now
             spd["bytes"] = got
-            pct = f"{got / total * 100:.0f}%" if total else "…"
+            pct = f"{got/total*100:.0f}%" if total else "…"
             eta = "?"
-            if spd["kbs"] > 0 and total:
-                s = (total - got) / 1024 / spd["kbs"]
-                eta = f"{int(s // 60)}د{int(s % 60)}ث" if s >= 60 else f"{int(s)}ث"
-
+            if spd["kbs"]>0 and total:
+                s = (total-got)/1024/spd["kbs"]
+                eta = f"{int(s//60)}د{int(s%60)}ث" if s>=60 else f"{int(s)}ث"
             asyncio.run_coroutine_threadsafe(
-                safe_edit(
-                    status_msg,
-                    f"⬇️ جارٍ التحميل...\n⚡ {fmt_speed(spd['kbs'])}\n📦 {fmt_size(got)}/{fmt_size(total)} [{pct}]  ETA: {eta}",
-                ),
-                loop,
-            )
+                safe_edit(status_msg, f"⬇️ جارٍ التحميل...\n⚡ {fmt_speed(spd['kbs'])}\n📦 {fmt_size(got)}/{fmt_size(total)} [{pct}]  ETA: {eta}"), loop)
 
-        is_pin = is_pinterest_url(url)
-        is_yt = is_youtube_url(url)
+        is_yt = is_youtube(url)
+        is_pin = is_pinterest(url)
 
-        opts: Dict[str, Any] = {
+        opts = {
             "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-            "socket_timeout": 120,
-            "retries": 15,
-            "fragment_retries": 15,
+            "quiet": True, "no_warnings": True, "noprogress": True,
+            "socket_timeout": 120, "retries": 15, "fragment_retries": 15,
             "continuedl": not is_pin,
             "concurrent_fragment_downloads": 0 if is_pin else 16,
-            "http_chunk_size": 8 * 1024 * 1024,
-            "buffersize": 1024 * 1024,
-            "no_mtime": True,
-            "no_playlist": True,
-            "prefer_ffmpeg": True,
-            "merge_output_format": "mp4",
-            "format": fmt_str,
-            "progress_hooks": [hook],
-            "geo_bypass": True,
-            "skip_unavailable_fragments": True,
-            "keep_fragments": False,
-            "lazy_playlist": True,
+            "http_chunk_size": 8*1024*1024, "buffersize": 1024*1024,
+            "no_mtime": True, "no_playlist": True, "prefer_ffmpeg": True,
+            "merge_output_format": "mp4", "format": fmt_str,
+            "progress_hooks": [hook], "geo_bypass": True,
+            "skip_unavailable_fragments": True, "keep_fragments": False,
         }
-
-        if shutil.which("aria2c") and not is_pinterest_url(url):
+        # خاصية Shorts والمانيفست لليوتيوب
+        if is_yt:
+            opts["youtube_include_dash_manifest"] = True
+            # لا نستخدم aria2c مع يوتيوب
+        elif not is_pin and shutil.which("aria2c"):
             opts["external_downloader"] = "aria2c"
-            opts["external_downloader_args"] = ["-x", "8", "-s", "8", "-k", "1M"]
+            opts["external_downloader_args"] = ["-x","8","-s","8","-k","1M"]
 
         if COOKIE_FILE and os.path.exists(COOKIE_FILE):
             opts["cookiefile"] = COOKIE_FILE
@@ -534,12 +294,9 @@ async def do_download(
 
         if qtype == "a":
             opts.pop("merge_output_format", None)
-            opts["postprocessors"] = [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}
-            ]
+            opts["postprocessors"] = [{"key":"FFmpegExtractAudio","preferredcodec":"mp3","preferredquality":"128"}]
 
         filename = None
-        info: Dict[str, Any] = {}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
@@ -547,401 +304,200 @@ async def do_download(
             filename = _locate_file(raw, info.get("id", vid_id), qtype)
         except Exception as e:
             await status_msg.edit_text(f"❌ {str(e)[:250]}")
-            cleanup(vid_id)
-            return
+            cleanup(vid_id); return
 
         if not filename or not os.path.exists(filename):
-            await status_msg.edit_text("❌ الملف غير موجود.")
-            cleanup(vid_id)
-            return
+            await status_msg.edit_text("❌ الملف غير موجود."); cleanup(vid_id); return
 
         size = os.path.getsize(filename)
         if size == 0:
-            await status_msg.edit_text("❌ الملف المُحمّل فارغ. قد يكون الفيديو محذوفًا أو خاصًا.")
-            cleanup(vid_id)
-            return
+            await status_msg.edit_text("❌ الملف فارغ."); cleanup(vid_id); return
 
-        speed = float(spd["kbs"])
-        title = (info.get("title") or "")[:200]
-        uploader = (info.get("uploader") or info.get("channel") or "")[:100]
+        speed = spd["kbs"]; title = (info.get("title") or "")[:200]; uploader = (info.get("uploader") or info.get("channel") or "")[:100]
 
         if size > MAX_SIZE and qtype != "a":
-            await safe_edit(status_msg, "📦 تقسيم الملف...")
+            await safe_edit(status_msg, "📦 تقسيم...")
             parts = await loop.run_in_executor(None, lambda: split_video(filename, MAX_SIZE))
             if not parts:
-                await status_msg.edit_text("❌ فشل التقسيم.")
-                cleanup(vid_id)
-                return
-
+                await status_msg.edit_text("❌ فشل التقسيم."); cleanup(vid_id); return
             total = len(parts)
             base_cap = f"<b>{title}</b>\n👤 {uploader}\n📥 {BOT_NAME}\n"
             for i, p in enumerate(parts, 1):
                 ps = os.path.getsize(p)
-                with open(p, "rb") as vf:
-                    await ctx.bot.send_video(
-                        chat_id=chat_id,
-                        video=vf,
-                        caption=f"{base_cap}📦 جزء {i}/{total} | {fmt_size(ps)}",
-                        parse_mode="HTML",
-                        read_timeout=600,
-                        write_timeout=600,
-                        supports_streaming=True,
-                    )
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
-
-            await safe_edit(status_msg, "✅ تم.")
+                with open(p,"rb") as vf:
+                    await ctx.bot.send_video(chat_id=chat_id, video=vf, caption=f"{base_cap}📦 جزء {i}/{total} | {fmt_size(ps)}", parse_mode="HTML", read_timeout=600, write_timeout=600, supports_streaming=True)
+                try: os.remove(p)
+                except: pass
+            await safe_edit(status_msg, "✅ تم."); db_log(uid, url, title, qtype, size, speed); cleanup(vid_id)
+        else:
+            elapsed = int(time.time()-t0)
+            await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}... ⏱ {elapsed}ث")
+            caption = f"<b>{title}</b>\n👤 {uploader}\n⚡ {fmt_speed(speed)} | ⏱ {elapsed}ث\n📥 {BOT_NAME}"
+            kw = dict(chat_id=chat_id, caption=caption, parse_mode="HTML", read_timeout=600, write_timeout=600)
+            with open(filename,"rb") as f:
+                if qtype=="a": await ctx.bot.send_audio(audio=f, title=title[:64], performer=uploader or "YAMD", **kw)
+                else: await ctx.bot.send_video(video=f, supports_streaming=True, **kw)
             db_log(uid, url, title, qtype, size, speed)
+            try: await status_msg.delete()
+            except: pass
             cleanup(vid_id)
-            return
 
-        elapsed = int(time.time() - t0)
-        await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}... ⏱ {elapsed}ث")
-        caption = f"<b>{title}</b>\n👤 {uploader}\n⚡ {fmt_speed(speed)} | ⏱ {elapsed}ث\n📥 {BOT_NAME}"
-        kw = dict(chat_id=chat_id, caption=caption, parse_mode="HTML", read_timeout=600, write_timeout=600)
-        with open(filename, "rb") as f:
-            if qtype == "a":
-                await ctx.bot.send_audio(audio=f, title=title[:64], performer=uploader or "YAMD", **kw)
-            else:
-                await ctx.bot.send_video(video=f, supports_streaming=True, **kw)
-
-        db_log(uid, url, title, qtype, size, speed)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        cleanup(vid_id)
-
-async def download_pinterest(
-    ctx: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    url: str,
-    status_msg,
-    uid: int,
-) -> None:
-    loop = asyncio.get_running_loop()
-    vid_id = f"v{uid}{int(time.time())}"
-    output_file = str(DL_DIR / f"{vid_id}.mp4")
-
+# ═══════════════════════════════════════════════════════════
+# تحميل Pinterest (كما هو)
+# ═══════════════════════════════════════════════════════════
+async def download_pinterest(ctx, chat_id, url, status_msg, uid):
+    loop = asyncio.get_running_loop(); vid_id = f"v{uid}{int(time.time())}"; output = str(DL_DIR / f"{vid_id}.mp4")
     try:
-        await safe_edit(status_msg, "🔍 جارٍ استخراج رابط الفيديو من Pinterest...")
-
-        direct_url = ""
-        cmd = ["yt-dlp", "-g", "--user-agent", PINTEREST_UA, "--no-check-certificate", "--no-warnings", "--quiet", url]
-        if COOKIE_FILE and os.path.exists(COOKIE_FILE):
-            cmd += ["--cookies", COOKIE_FILE]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        await safe_edit(status_msg, "🔍 استخراج رابط Pinterest...")
+        cmd = ["yt-dlp","-g","--user-agent",PINTEREST_UA,"--no-check-certificate","--no-warnings","--quiet",url]
+        if COOKIE_FILE and os.path.exists(COOKIE_FILE): cmd += ["--cookies", COOKIE_FILE]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await proc.communicate()
-        if proc.returncode == 0:
-            direct_url = stdout.decode(errors="ignore").strip().splitlines()[0].strip() if stdout else ""
-
-        if not direct_url:
-            try:
-                with yt_dlp.YoutubeDL(
-                    {
-                        "quiet": True,
-                        "no_warnings": True,
-                        "http_headers": {"User-Agent": PINTEREST_UA, **COMMON_HEADERS},
-                        **({"cookiefile": COOKIE_FILE} if COOKIE_FILE and os.path.exists(COOKIE_FILE) else {}),
-                    }
-                ) as ydl:
-                    info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-                for f in (info.get("formats") or []):
-                    u = f.get("url") or ""
-                    if u and ("m3u8" in u or "mp4" in u or "https" in u):
-                        direct_url = u
-                        break
-            except Exception:
-                pass
-
-        if not direct_url:
-            raise RuntimeError((stderr.decode(errors="ignore") or "لم يتم استخراج رابط مباشر.")[:250])
-
-        await safe_edit(status_msg, "⬇️ جارٍ تحميل الفيديو بواسطة ffmpeg...")
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-user_agent",
-            PINTEREST_UA,
-            "-i",
-            direct_url,
-            "-c",
-            "copy",
-            "-bsf:a",
-            "aac_adtstoasc",
-            output_file,
-        ]
+        direct = stdout.decode(errors="ignore").strip().splitlines()[0].strip() if proc.returncode==0 and stdout else ""
+        if not direct:
+            # fallback من JSON
+            with yt_dlp.YoutubeDL({"quiet":True,"no_warnings":True,"http_headers":{"User-Agent":PINTEREST_UA}, **({"cookiefile":COOKIE_FILE} if COOKIE_FILE and os.path.exists(COOKIE_FILE) else {})}) as ydl:
+                info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+            for f in info.get("formats",[]):
+                u = f.get("url","")
+                if u and ("m3u8" in u or "mp4" in u): direct = u; break
+        if not direct: raise RuntimeError("لم يتم استخراج رابط مباشر")
+        await safe_edit(status_msg, "⬇️ تحميل بـ ffmpeg...")
+        ffmpeg_cmd = ["ffmpeg","-y","-loglevel","error","-user_agent",PINTEREST_UA,"-i",direct,"-c","copy","-bsf:a","aac_adtstoasc",output]
         proc2 = await asyncio.create_subprocess_exec(*ffmpeg_cmd)
         await proc2.wait()
-        if proc2.returncode != 0:
-            raise RuntimeError("فشل تحميل الفيديو بواسطة ffmpeg.")
-
-        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
-            raise RuntimeError("الملف المُحمّل فارغ.")
-
-        size = os.path.getsize(output_file)
-        title = "فيديو Pinterest"
-        uploader = "Pinterest"
+        if proc2.returncode!=0: raise RuntimeError("فشل ffmpeg")
+        if not os.path.exists(output) or os.path.getsize(output)==0: raise RuntimeError("ملف فارغ")
+        size = os.path.getsize(output)
+        title = "فيديو Pinterest"; uploader = "Pinterest"
         try:
-            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
-                info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-            title = (info.get("title") or title)[:200]
-            uploader = (info.get("uploader") or info.get("channel") or uploader)[:100]
-        except Exception:
-            pass
-
+            with yt_dlp.YoutubeDL({"quiet":True}) as ydl: info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+            title = (info.get("title") or title)[:200]; uploader = (info.get("uploader") or info.get("channel") or uploader)[:100]
+        except: pass
         if size > MAX_SIZE:
             await safe_edit(status_msg, "📦 تقسيم...")
-            parts = await loop.run_in_executor(None, lambda: split_video(output_file, MAX_SIZE))
-            if not parts:
-                await status_msg.edit_text("❌ فشل التقسيم.")
-                cleanup(vid_id)
-                return
-
-            total = len(parts)
-            base_cap = f"<b>{title}</b>\n👤 {uploader}\n📥 {BOT_NAME}\n"
-            for i, p in enumerate(parts, 1):
+            parts = await loop.run_in_executor(None, lambda: split_video(output, MAX_SIZE))
+            if not parts: await status_msg.edit_text("❌ فشل التقسيم"); cleanup(vid_id); return
+            total = len(parts); base = f"<b>{title}</b>\n👤 {uploader}\n📥 {BOT_NAME}\n"
+            for i, p in enumerate(parts,1):
                 ps = os.path.getsize(p)
-                with open(p, "rb") as vf:
-                    await ctx.bot.send_video(
-                        chat_id=chat_id,
-                        video=vf,
-                        caption=f"{base_cap}📦 جزء {i}/{total} | {fmt_size(ps)}",
-                        parse_mode="HTML",
-                        read_timeout=600,
-                        write_timeout=600,
-                        supports_streaming=True,
-                    )
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
+                with open(p,"rb") as vf: await ctx.bot.send_video(chat_id=chat_id, video=vf, caption=f"{base}📦 جزء {i}/{total} | {fmt_size(ps)}", parse_mode="HTML", read_timeout=600, write_timeout=600, supports_streaming=True)
+                try: os.remove(p)
+                except: pass
             await safe_edit(status_msg, "✅ تم.")
         else:
             await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}...")
             kw = dict(chat_id=chat_id, caption=f"<b>{title}</b>\n👤 {uploader}\n📥 {BOT_NAME}", parse_mode="HTML", read_timeout=600, write_timeout=600)
-            with open(output_file, "rb") as f:
-                await ctx.bot.send_video(video=f, supports_streaming=True, **kw)
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-
-        db_log(uid, url, title, "pinterest", size, 0)
-        cleanup(vid_id)
-
+            with open(output,"rb") as f: await ctx.bot.send_video(video=f, supports_streaming=True, **kw)
+            try: await status_msg.delete()
+            except: pass
+        db_log(uid, url, title, "pinterest", size, 0); cleanup(vid_id)
     except Exception as e:
-        await status_msg.edit_text(f"❌ فشل تحميل Pinterest: {str(e)[:250]}")
-        cleanup(vid_id)
+        await status_msg.edit_text(f"❌ فشل تحميل Pinterest: {str(e)[:250]}"); cleanup(vid_id)
 
-# =========================
-# UI / Commands
-# =========================
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+# ═══════════════════════════════════════════════════════════
+# واجهة المستخدم
+# ═══════════════════════════════════════════════════════════
+async def cmd_start(update, ctx):
     db_user(update.effective_user)
-    msg = (
-        f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n"
-        f"<b>{BOT_FULL_NAME}</b>\n\n"
-        "⚡ أرسل رابط الفيديو من أي منصة وسأحمّله بأقصى سرعة.\n"
-        "/about | /admin"
-    )
-    if update.effective_user and update.effective_user.id == ADMIN_ID:
-        msg += "\n🛡️ لوحة التحكم: /admin"
+    msg = f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n<b>{BOT_FULL_NAME}</b>\n\n⚡ أرسل رابط الفيديو من أي منصة.\n/about | /admin"
+    if update.effective_user.id == ADMIN_ID: msg += "\n🛡️ لوحة التحكم: /admin"
     await update.message.reply_text(msg, parse_mode="HTML")
 
-async def cmd_about(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\n"
-        "⚡ بوت تحميل متعدد الطبقات.\n"
-        "✅ استخراج مرن ليوتيوب\n"
-        "✅ دعم Pinterest\n"
-        "📦 تقسيم ذكي للملفات الكبيرة\n"
-        "🚀 aria2c + ffmpeg + yt-dlp fallback\n"
-        "الهدف: ثبات أعلى قبل السرعة.",
-        parse_mode="HTML",
-    )
+async def cmd_about(update, ctx):
+    await update.message.reply_text(f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\n✅ معمارية متعددة الطبقات لثبات أعلى.", parse_mode="HTML")
 
-async def show_formats(update: Update, ctx: ContextTypes.DEFAULT_TYPE, url: str, status_msg) -> None:
+async def show_formats(update, ctx, url, status_msg):
     loop = asyncio.get_running_loop()
     try:
-        info, video_fmts, best_audio = await loop.run_in_executor(None, extract_formats, url)
+        info, v_fmts, best_aud = await loop.run_in_executor(None, extract_formats, url)
     except Exception as e:
-        await status_msg.edit_text(f"❌ فشل استخراج التنسيقات: {str(e)[:250]}")
-        return
-
+        await status_msg.edit_text(f"❌ فشل استخراج التنسيقات: {str(e)[:250]}"); return
     ctx.user_data["url"] = url
-    kb: List[List[InlineKeyboardButton]] = []
-
-    for v in video_fmts:
-        height = v["height"]
-        size_str = f" (~{fmt_size(v['filesize'])})" if v.get("filesize") else ""
-        label = f"🎥 {height}p {v.get('ext', 'mp4')}{size_str}"
-        # ✅ إرسال format_id بدلاً من height
+    kb = []
+    for v in v_fmts:
+        sz = f" (~{fmt_size(v['filesize'])})" if v.get("filesize") else ""
+        label = f"🎥 {v['height']}p {v['ext']}{sz}"
         kb.append([InlineKeyboardButton(label, callback_data=f"dl|v|{v['format_id']}")])
-
-    if best_audio:
-        size_str = f" (~{fmt_size(best_audio['filesize'])})" if best_audio.get("filesize") else ""
-        label = f"🔊 صوت MP3 {best_audio.get('ext', 'm4a')} {int(best_audio.get('abr') or 0)}kbps{size_str}"
-        kb.append([InlineKeyboardButton(label, callback_data=f"dl|a|{best_audio['format_id']}")])
-
+    if best_aud:
+        sz = f" (~{fmt_size(best_aud['filesize'])})" if best_aud.get("filesize") else ""
+        label = f"🔊 صوت MP3 {best_aud['ext']} {int(best_aud['abr'])}kbps{sz}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"dl|a|{best_aud['format_id']}")])
     if not kb:
-        await status_msg.edit_text("❌ لا توجد تنسيقات متاحة لهذا الرابط.")
-        return
+        await status_msg.edit_text("❌ لا توجد تنسيقات."); return
+    await status_msg.edit_text(f"🎞️ <b>{(info.get('title') or 'فيديو')[:200]}</b>\nاختر التنسيق:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    await status_msg.edit_text(
-        f"🎞️ <b>{(info.get('title', 'فيديو') or 'فيديو')[:200]}</b>\nاختر التنسيق المطلوب:",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="HTML",
-    )
-
-async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_link(update, ctx):
     db_user(update.effective_user)
     url = (update.message.text or "").strip()
-    if not url.startswith("http"):
-        await update.message.reply_text("⚠️ أرسل رابطاً صالحاً.")
-        return
-
-    if is_pinterest_url(url):
-        status = await update.message.reply_text("⬇️ جارٍ تحميل فيديو Pinterest...")
+    if not url.startswith("http"): await update.message.reply_text("⚠️ أرسل رابطاً صالحاً."); return
+    if is_pinterest(url):
+        status = await update.message.reply_text("⬇️ جارٍ تحميل Pinterest...")
         asyncio.create_task(download_pinterest(ctx, update.message.chat_id, url, status, update.effective_user.id))
         return
-
-    status_msg = await update.message.reply_text("🔍 جارٍ فحص التنسيقات...")
+    status_msg = await update.message.reply_text("🔍 فحص التنسيقات...")
     await show_formats(update, ctx, url, status_msg)
 
-async def on_format_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    await q.answer()
-    data = (q.data or "").split("|")
-    if len(data) < 3:
-        return
-
-    qtype = data[1]
-    fmt_id = data[2]   # ✅ أصبح format_id
+async def on_format_choice(update, ctx):
+    q = update.callback_query; await q.answer()
+    parts = (q.data or "").split("|")
+    if len(parts) < 3: return
+    qtype, fid = parts[1], parts[2]
     url = ctx.user_data.get("url")
-    if not url:
-        await q.edit_message_text("❌ الجلسة منتهية. أرسل الرابط مجددًا.")
-        return
-
-    # ✅ بناء fmt_str مباشرة من format_id
-    fmt_str = f"{fmt_id}+bestaudio/{fmt_id}/best"
-    desc = "صوت" if qtype == "a" else "فيديو"
+    if not url: await q.edit_message_text("❌ الجلسة منتهية."); return
+    # بناء format string باستخدام ba (بدلاً من bestaudio)
+    if qtype == "a":
+        fmt_str = f"{fid}+ba/b"
+        desc = "صوت"
+    else:
+        fmt_str = f"{fid}+ba/b"
+        desc = "فيديو"
     await q.edit_message_text(f"⬇️ جارٍ تحميل {desc}...")
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt_str, qtype, q.message, q.from_user.id))
 
-# =========================
-# Admin
-# =========================
-async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ للمشرف فقط.")
-        return
+# ═══════════════════════════════════════════════════════════
+# لوحة الإدارة (اختصار)
+# ═══════════════════════════════════════════════════════════
+async def cmd_admin(update, ctx):
+    if update.effective_user.id != ADMIN_ID: await update.message.reply_text("⛔ للمشرف فقط."); return
+    kb = [[InlineKeyboardButton("👥 المستخدمون", callback_data="a|users")],
+          [InlineKeyboardButton("📜 آخر التحميلات", callback_data="a|dls")],
+          [InlineKeyboardButton("📊 إحصائيات", callback_data="a|stats")],
+          [InlineKeyboardButton("🗑 تنظيف مؤقت", callback_data="a|clean")]]
+    await update.message.reply_text(f"🛡️ <b>YAMD Admin</b>\naria2: {'✅' if shutil.which('aria2c') else '❌'} | ffmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}\n🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    kb = [
-        [InlineKeyboardButton("👥 المستخدمون", callback_data="a|users")],
-        [InlineKeyboardButton("📜 آخر التحميلات", callback_data="a|dls")],
-        [InlineKeyboardButton("📊 إحصائيات", callback_data="a|stats")],
-        [InlineKeyboardButton("🗑 تنظيف مؤقت", callback_data="a|clean")],
-    ]
-
-    await update.message.reply_text(
-        f"🛡️ <b>YAMD Admin</b>\n"
-        f"aria2: {'✅' if shutil.which('aria2c') else '❌'} | ffmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}\n"
-        f"🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="HTML",
-    )
-
-async def on_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_admin(update, ctx):
     q = update.callback_query
-    if q.from_user.id != ADMIN_ID:
-        await q.answer("⛔", show_alert=True)
-        return
-
-    await q.answer()
-    act = (q.data or "").split("|")[1]
-
+    if q.from_user.id != ADMIN_ID: await q.answer("⛔", show_alert=True); return
+    await q.answer(); act = q.data.split("|")[1]
     if act == "users":
         rows = db.execute("SELECT uid,username,fname,cnt,active FROM users ORDER BY active DESC LIMIT 15").fetchall()
         t = "👥 <b>آخر 15 مستخدم</b>\n\n"
-        for uid, un, fn, cnt, ac in rows:
-            t += f"• <code>{uid}</code> {un or fn or 'Unknown'}  ⬇️{cnt}  {(ac or '')[:10]}\n"
+        for uid,un,fn,cnt,ac in rows: t += f"• <code>{uid}</code> {un or fn or 'Unknown'}  ⬇️{cnt}  {(ac or '')[:10]}\n"
         await q.edit_message_text(t or "لا يوجد.", parse_mode="HTML")
-
     elif act == "dls":
-        rows = db.execute(
-            """
-            SELECT d.uid,d.title,d.quality,d.size,d.speed,d.ts,u.username
-            FROM downloads d
-            LEFT JOIN users u ON d.uid=u.uid
-            ORDER BY d.id DESC
-            LIMIT 20
-            """
-        ).fetchall()
+        rows = db.execute("SELECT d.uid,d.title,d.quality,d.size,d.speed,d.ts,u.username FROM downloads d LEFT JOIN users u ON d.uid=u.uid ORDER BY d.id DESC LIMIT 20").fetchall()
         t = "📜 <b>آخر 20 تحميلة</b>\n\n"
-        for uid, ttl, qual, sz, spd, ts, un in rows:
-            t += f"• <b>{un or uid}</b> | {qual} | {fmt_size(sz) if sz else '?'} | {fmt_speed(spd) if spd else '?'}\n  {(ttl or '')[:35]}\n"
+        for uid,ttl,qual,sz,spd,ts,un in rows: t += f"• <b>{un or uid}</b> | {qual} | {fmt_size(sz) if sz else '?'} | {fmt_speed(spd) if spd else '?'}\n  {(ttl or '')[:35]}\n"
         await q.edit_message_text(t or "لا توجد.", parse_mode="HTML")
-
     elif act == "stats":
-        uc = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        dc = db.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
-        avg = db.execute("SELECT AVG(speed) FROM downloads").fetchone()[0] or 0
-        await q.edit_message_text(
-            f"📊 <b>YAMD Stats</b>\n\n"
-            f"👥 {uc} مستخدم\n"
-            f"📥 {dc} تحميلة\n"
-            f"⚡ متوسط: {fmt_speed(avg)}\n"
-            f"aria2: {'✅' if shutil.which('aria2c') else '❌'}\n"
-            f"🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}",
-            parse_mode="HTML",
-        )
-
+        uc = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]; dc = db.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]; avg = db.execute("SELECT AVG(speed) FROM downloads").fetchone()[0] or 0
+        await q.edit_message_text(f"📊 <b>YAMD Stats</b>\n\n👥 {uc} مستخدم\n📥 {dc} تحميلة\n⚡ متوسط: {fmt_speed(avg)}\naria2: {'✅' if shutil.which('aria2c') else '❌'}\n🍪 Cookies: {'✅' if COOKIE_FILE else '❌'}", parse_mode="HTML")
     elif act == "clean":
-        for f in DL_DIR.iterdir():
-            try:
-                if f.is_file():
-                    f.unlink()
-            except Exception:
-                pass
+        for f in DL_DIR.iterdir(): try: f.unlink() if f.is_file() else None except: pass
         await q.edit_message_text("🗑 تم تنظيف المجلد المؤقت.")
 
-async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"[ERROR] {ctx.error}", exc_info=ctx.error)
+async def on_error(update, ctx): logger.error(f"[ERROR] {ctx.error}", exc_info=ctx.error)
 
-# =========================
-# Main / Webhook
-# =========================
-async def main() -> None:
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing")
-    if not WEBHOOK_URL:
-        raise RuntimeError("WEBHOOK_URL is missing")
-
-    tmp_app = Application.builder().token(BOT_TOKEN).build()
-    await tmp_app.bot.delete_webhook(drop_pending_updates=True)
+# ═══════════════════════════════════════════════════════════
+# التشغيل الرئيسي (Webhook)
+# ═══════════════════════════════════════════════════════════
+async def main():
+    if not BOT_TOKEN or not WEBHOOK_URL: raise RuntimeError("Missing BOT_TOKEN or WEBHOOK_URL")
+    tmp = Application.builder().token(BOT_TOKEN).build()
+    await tmp.bot.delete_webhook(drop_pending_updates=True)
     logger.info("🧹 Old webhook removed")
-
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(600)
-        .write_timeout(600)
-        .pool_timeout(120)
-        .concurrent_updates(2)
-        .build()
-    )
-
+    app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(600).write_timeout(600).pool_timeout(120).concurrent_updates(2).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("about", cmd_about))
     app.add_handler(CommandHandler("admin", cmd_admin))
@@ -949,53 +505,27 @@ async def main() -> None:
     app.add_handler(CallbackQueryHandler(on_admin, pattern=r"^a\|"))
     app.add_handler(CallbackQueryHandler(on_format_choice, pattern=r"^dl\|"))
     app.add_error_handler(on_error)
-
-    await app.initialize()
-    await app.start()
-
+    await app.initialize(); await app.start()
     webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    await app.bot.set_webhook(url=webhook_url, allowed_updates=["message", "callback_query"])
+    await app.bot.set_webhook(url=webhook_url, allowed_updates=["message","callback_query"])
     logger.info("✅ Webhook configured")
-
     asyncio.create_task(cleanup_task())
-
     web_app = web.Application()
-
-    async def telegram_webhook(request):
-        try:
-            data = await request.json()
-            update = Update.de_json(data, app.bot)
-            await app.process_update(update)
-            return web.Response(text="ok")
-        except Exception as e:
-            logger.error(f"Webhook handler error: {e}")
-            return web.Response(status=500, text="error")
-
-    async def health(request):
-        return web.Response(text="YAMD is running!")
-
-    web_app.router.add_post(f"/{BOT_TOKEN}", telegram_webhook)
-    web_app.router.add_get("/", health)
-
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"🌐 Webhook server listening on port {PORT}")
-
+    async def webhook_handler(request):
+        try: update = Update.de_json(await request.json(), app.bot); await app.process_update(update); return web.Response(text="ok")
+        except Exception as e: logger.error(f"Webhook error: {e}"); return web.Response(status=500, text="error")
+    web_app.router.add_post(f"/{BOT_TOKEN}", webhook_handler)
+    web_app.router.add_get("/", lambda r: web.Response(text="YAMD is running!"))
+    runner = web.AppRunner(web_app); await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT); await site.start()
+    logger.info(f"🌐 Webhook server on port {PORT}")
     try:
-        while True:
-            await asyncio.sleep(3600)
+        while True: await asyncio.sleep(3600)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        await app.stop()
-        await app.shutdown()
+        await app.bot.delete_webhook(drop_pending_updates=True); await app.stop(); await app.shutdown()
         logger.info("Bot stopped cleanly")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception:
-        logger.critical(f"Fatal: {traceback.format_exc()}")
-        sys.exit(1)
+    try: asyncio.run(main())
+    except Exception: logger.critical(f"Fatal: {traceback.format_exc()}"); sys.exit(1)
