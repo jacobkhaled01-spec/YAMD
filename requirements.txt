@@ -1,22 +1,5 @@
-# التطبيق والبوت
-python-telegram-bot[all]==20.3
-apscheduler==3.10.4
-feedparser==6.0.10
-
-# الأدوات المساعدة
-requests==2.31.0
-python-dateutil==2.8.2
-pytz==2023.3
-
-# تطوير (اختياري)
-python-dotenv==1.0.0  # لإدارة المتغيرات البيئية
-
-# ملاحظات التثبيت:
-# لتثبيت جميع المتطلبات:
-# pip install -r requirements.txt
-#
-# لتثبيت مع الدعم الكامل:
-# pip install python-telegram-bot[all]==20.3
-#
-# للنشر على خادم:
-# pip3 install -r requirements.txt
+python-telegram-bot[httpx]>=20.0
+yt-dlp
+httpx==0.27.0
+httpcore==0.17.3
+aiohttp
