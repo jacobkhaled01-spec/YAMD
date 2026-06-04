@@ -331,35 +331,82 @@ def _ydl_info(url: str) -> Dict[str, Any]:
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
 
+# ✅ دالة parse_formats المحسّنة
 def parse_formats(info: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     formats = info.get("formats", []) or []
     video_fmts: List[Dict[str, Any]] = []
     audio_fmts: List[Dict[str, Any]] = []
-    seen_heights = set()
+    seen = set()
 
     for f in formats:
-        vcodec = f.get("vcodec")
-        acodec = f.get("acodec")
-        height = int(f.get("height") or 0)
+        try:
+            format_id = str(f.get("format_id") or "")
+            vcodec = f.get("vcodec")
+            acodec = f.get("acodec")
+            height = f.get("height") or 0
+            width = f.get("width") or 0
+            ext = f.get("ext") or "mp4"
+            filesize = f.get("filesize") or f.get("filesize_approx") or 0
+            protocol = f.get("protocol") or ""
 
-        if height > 0 and (vcodec != "none" or f.get("protocol") in {"m3u8", "m3u8_native", "http"}):
-            if height not in seen_heights:
-                seen_heights.add(height)
-                video_fmts.append(
-                    {
+            # --- VIDEO ---
+            is_video = height > 0 or (vcodec and vcodec != "none")
+            if is_video:
+                if not height and width:
+                    if width >= 3840: height = 2160
+                    elif width >= 2560: height = 1440
+                    elif width >= 1920: height = 1080
+                    elif width >= 1280: height = 720
+                    elif width >= 854: height = 480
+                    elif width >= 640: height = 360
+                    else: height = 240
+                if height <= 0:
+                    continue
+
+                key = (height, ext)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                video_fmts.append({
+                    "height": height,
+                    "filesize": filesize,
+                    "ext": ext,
+                    "format_id": format_id,
+                    "protocol": protocol,
+                })
+
+            # --- AUDIO ---
+            is_audio = acodec and acodec != "none" and (vcodec == "none" or not vcodec)
+            if is_audio:
+                abr = int(f.get("abr") or 0)
+                audio_fmts.append({
+                    "abr": abr,
+                    "filesize": filesize,
+                    "ext": ext,
+                    "format_id": format_id,
+                })
+        except Exception:
+            continue
+
+    # Fallback: استخراج من format_note إذا لم نجد شيء
+    if not video_fmts:
+        for f in formats:
+            try:
+                format_note = str(f.get("format_note") or "")
+                ext = f.get("ext") or "mp4"
+                match = re.search(r"(\d{3,4})p", format_note)
+                if match:
+                    height = int(match.group(1))
+                    video_fmts.append({
                         "height": height,
-                        "filesize": f.get("filesize") or f.get("filesize_approx") or 0,
-                        "ext": f.get("ext", "mp4"),
-                    }
-                )
-        elif acodec and acodec != "none" and vcodec == "none":
-            audio_fmts.append(
-                {
-                    "abr": f.get("abr") or 0,
-                    "filesize": f.get("filesize") or f.get("filesize_approx") or 0,
-                    "ext": f.get("ext", "m4a"),
-                }
-            )
+                        "filesize": f.get("filesize") or 0,
+                        "ext": ext,
+                        "format_id": str(f.get("format_id") or ""),
+                        "protocol": f.get("protocol") or "",
+                    })
+            except Exception:
+                pass
 
     video_fmts.sort(key=lambda x: x["height"], reverse=True)
     best_audio = max(audio_fmts, key=lambda x: x["abr"] or 0) if audio_fmts else None
@@ -369,14 +416,12 @@ def extract_formats(url: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Opt
     if is_youtube_url(url):
         last_error: Optional[str] = None
 
-        # Primary: yt-dlp Python API with YouTube android client.
         try:
             info = _ydl_info(url)
             return parse_formats(info)
         except Exception as e:
             last_error = str(e)
 
-        # Fallback: CLI with multiple clients.
         for client in YT_CLIENTS:
             try:
                 info = _yt_cli_json(url, client)
@@ -387,7 +432,6 @@ def extract_formats(url: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Opt
 
         raise RuntimeError(f"فشل استخراج تنسيقات YouTube: {last_error or 'unknown error'}")
 
-    # Non-YouTube sources: use yt-dlp API first.
     info = _ydl_info(url)
     return parse_formats(info)
 
@@ -584,7 +628,6 @@ async def download_pinterest(
     try:
         await safe_edit(status_msg, "🔍 جارٍ استخراج رابط الفيديو من Pinterest...")
 
-        # First try yt-dlp direct URL extraction.
         direct_url = ""
         cmd = ["yt-dlp", "-g", "--user-agent", PINTEREST_UA, "--no-check-certificate", "--no-warnings", "--quiet", url]
         if COOKIE_FILE and os.path.exists(COOKIE_FILE):
@@ -599,7 +642,6 @@ async def download_pinterest(
         if proc.returncode == 0:
             direct_url = stdout.decode(errors="ignore").strip().splitlines()[0].strip() if stdout else ""
 
-        # Fallback: use yt-dlp JSON and try to locate media URL.
         if not direct_url:
             try:
                 with yt_dlp.YoutubeDL(
@@ -743,12 +785,13 @@ async def show_formats(update: Update, ctx: ContextTypes.DEFAULT_TYPE, url: str,
         height = v["height"]
         size_str = f" (~{fmt_size(v['filesize'])})" if v.get("filesize") else ""
         label = f"🎥 {height}p {v.get('ext', 'mp4')}{size_str}"
-        kb.append([InlineKeyboardButton(label, callback_data=f"dl|v|{height}")])
+        # ✅ إرسال format_id بدلاً من height
+        kb.append([InlineKeyboardButton(label, callback_data=f"dl|v|{v['format_id']}")])
 
     if best_audio:
         size_str = f" (~{fmt_size(best_audio['filesize'])})" if best_audio.get("filesize") else ""
         label = f"🔊 صوت MP3 {best_audio.get('ext', 'm4a')} {int(best_audio.get('abr') or 0)}kbps{size_str}"
-        kb.append([InlineKeyboardButton(label, callback_data="dl|a|0")])
+        kb.append([InlineKeyboardButton(label, callback_data=f"dl|a|{best_audio['format_id']}")])
 
     if not kb:
         await status_msg.edit_text("❌ لا توجد تنسيقات متاحة لهذا الرابط.")
@@ -783,18 +826,15 @@ async def on_format_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     qtype = data[1]
-    height = int(data[2])
+    fmt_id = data[2]   # ✅ أصبح format_id
     url = ctx.user_data.get("url")
     if not url:
         await q.edit_message_text("❌ الجلسة منتهية. أرسل الرابط مجددًا.")
         return
 
-    fmt_str = (
-        f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
-        if qtype == "v"
-        else "bestaudio/best"
-    )
-    desc = f"{height}p" if qtype == "v" else "صوت"
+    # ✅ بناء fmt_str مباشرة من format_id
+    fmt_str = f"{fmt_id}+bestaudio/{fmt_id}/best"
+    desc = "صوت" if qtype == "a" else "فيديو"
     await q.edit_message_text(f"⬇️ جارٍ تحميل {desc}...")
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt_str, qtype, q.message, q.from_user.id))
 
@@ -887,7 +927,6 @@ async def main() -> None:
     if not WEBHOOK_URL:
         raise RuntimeError("WEBHOOK_URL is missing")
 
-    # Remove old webhook state.
     tmp_app = Application.builder().token(BOT_TOKEN).build()
     await tmp_app.bot.delete_webhook(drop_pending_updates=True)
     logger.info("🧹 Old webhook removed")
