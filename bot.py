@@ -529,12 +529,18 @@ async def download_pinterest(ctx, chat_id, url, status_msg, uid):
 # ═══════════════════════════════════════════════════════════
 async def cmd_start(update, ctx):
     db_user(update.effective_user)
-    msg = f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n<b>{BOT_FULL_NAME}</b>\n\n⚡ أرسل رابط الفيديو من أي منصة.\n/about | /admin"
-    if update.effective_user.id == ADMIN_ID: msg += "\n🛡️ لوحة التحكم: /admin"
-    await update.message.reply_text(msg, parse_mode="HTML")
+    msg = f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n<b>{BOT_FULL_NAME}</b>\n\n⚡ أرسل رابط الفيديو من أي منصة.\n/about"
 
 async def cmd_about(update, ctx):
-    await update.message.reply_text(f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\n✅ معمارية متعددة الطبقات لثبات أعلى.", parse_mode="HTML")
+    await update.message.reply_text(
+        f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\n"
+        "⚡ بوت تحميل سريع واحترافي\n"
+        "🎥 تحميل فيديو وصوت بجودات متعددة\n"
+        "📦 تقسيم تلقائي للملفات الكبيرة\n"
+        "🚀 أداء واستقرار عالي\n\n"
+        "💡 أرسل رابط الفيديو من أي منصة وسيتم التحميل فوراً.",
+        parse_mode="HTML"
+    )
 
 async def show_formats(update, ctx, url, status_msg):
     loop = asyncio.get_running_loop()
