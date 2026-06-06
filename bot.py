@@ -634,21 +634,22 @@ async def on_admin(update, ctx):
     if act == "users":
         rows = db.execute("""
             SELECT u.uid, u.username, u.fname, u.lname, u.lang, u.premium,
-                   u.cnt, u.active, u.seen, u.ip,
-                   COALESCE(SUM(d.size), 0) AS total_size,
-                   COALESCE(AVG(d.speed), 0) AS avg_speed,
-                   COALESCE(SUM(CASE WHEN d.quality = 'a' THEN 1 ELSE 0 END), 0) AS audio_cnt,
-                   (SELECT COUNT(*) FROM downloads d2 WHERE d2.uid = u.uid) AS total_dl,
-                   (SELECT GROUP_CONCAT(d3.title, ' || ' LIMIT 3) FROM (SELECT title FROM downloads WHERE uid = u.uid ORDER BY id DESC LIMIT 3) d3) AS last_three_titles,
-                   (SELECT GROUP_CONCAT(d3.ts, ' || ' LIMIT 3) FROM (SELECT ts FROM downloads WHERE uid = u.uid ORDER BY id DESC LIMIT 3) d3) AS last_three_dates
+                   u.cnt, u.active, u.seen, u.ip
             FROM users u
-            LEFT JOIN downloads d ON u.uid = d.uid
-            GROUP BY u.uid
             ORDER BY u.active DESC
             LIMIT 15
         """).fetchall()
-        t = "👥 <b>آخر 15 مستخدم (تحليل متقدم مع IP)</b>\n\n"
-        for uid, un, fn, ln, lang, premium, cnt, active, seen, ip, total_size, avg_speed, audio_cnt, total_dl, last_titles, last_dates in rows:
+        t = "👥 <b>آخر 15 مستخدم (تحليل متقدم مع IP)</b>
+
+"
+        for uid, un, fn, ln, lang, premium, cnt, active, seen, ip in rows:
+            # تفاصيل التحميلات الخاصة بالمستخدم
+            total_size = db.execute("SELECT COALESCE(SUM(size),0) FROM downloads WHERE uid=?", (uid,)).fetchone()[0]
+            total_dl = db.execute("SELECT COUNT(*) FROM downloads WHERE uid=?", (uid,)).fetchone()[0]
+            audio_cnt = db.execute("SELECT COUNT(*) FROM downloads WHERE uid=? AND quality='a'", (uid,)).fetchone()[0]
+            avg_speed = db.execute("SELECT COALESCE(AVG(speed),0) FROM downloads WHERE uid=?", (uid,)).fetchone()[0]
+            last_three = db.execute("SELECT title, ts FROM downloads WHERE uid=? ORDER BY id DESC LIMIT 3", (uid,)).fetchall()
+            
             full_name = fn
             if ln: full_name += " " + ln
             name = un or full_name or "Unknown"
@@ -662,23 +663,31 @@ async def on_admin(update, ctx):
             lang_str = lang if lang else "غير محدد"
             premium_icon = "🌟" if premium else ""
             user_ip = ip if ip else "غير معروف"
-            t += (f"• {premium_icon} <code>{uid}</code> {name}\n"
-                  f"  @{un if un else 'لا يوجد'} | 🌐 {lang_str}\n"
-                  f"  🌍 IP: {user_ip}\n"
-                  f"  🔗 tg://user?id={uid}\n"
-                  f"  🗓 أول: {first_seen} | آخر: {last_active} | مدة: {days_active}\n"
-                  f"  📥 التحميلات: {total_dl} (🎥 فيديو: {total_dl - audio_cnt} | 🔊 صوت: {audio_cnt})\n"
-                  f"  📦 حجم: {fmt_size(total_size)} | ⚡ متوسط السرعة: {fmt_speed(avg_speed)}\n")
-            if last_titles:
-                titles_list = last_titles.split(" || ")[:3]
-                dates_list = (last_dates or "").split(" || ")[:3]
-                t += "  🎬 آخر التحميلات:\n"
-                for i, (title, date) in enumerate(zip(titles_list, dates_list), 1):
-                    t += f"    {i}. {title[:60]}\n"
-                    t += f"       🕒 {date[:16]}\n" if date else ""
-            t += "\n"
-        await q.edit_message_text(t or "لا يوجد.", parse_mode="HTML")
-    elif act == "dls":
+            t += (f"• {premium_icon} <code>{uid}</code> {name}
+"
+                  f"  @{un if un else 'لا يوجد'} | 🌐 {lang_str}
+"
+                  f"  🌍 IP: {user_ip}
+"
+                  f"  🔗 tg://user?id={uid}
+"
+                  f"  🗓 أول: {first_seen} | آخر: {last_active} | مدة: {days_active}
+"
+                  f"  📥 التحميلات: {total_dl} (🎥 فيديو: {total_dl - audio_cnt} | 🔊 صوت: {audio_cnt})
+"
+                  f"  📦 حجم: {fmt_size(total_size)} | ⚡ متوسط السرعة: {fmt_speed(avg_speed)}
+")
+            if last_three:
+                t += "  🎬 آخر التحميلات:
+"
+                for i, (title, date) in enumerate(last_three, 1):
+                    t += f"    {i}. {title[:60]}
+"
+                    if date: t += f"       🕒 {date[:16]}
+"
+            t += "
+"
+        await q.edit_message_text(t or "لا يوجد.", parse_mode="HTML")    elif act == "dls":
         rows = db.execute("SELECT d.uid,d.title,d.quality,d.size,d.speed,d.ts,u.username FROM downloads d LEFT JOIN users u ON d.uid=u.uid ORDER BY d.id DESC LIMIT 20").fetchall()
         t = "📜 <b>آخر 20 تحميلة</b>\n\n"
         for uid,ttl,qual,sz,spd,ts,un in rows: t += f"• <b>{un or uid}</b> | {qual} | {fmt_size(sz) if sz else '?'} | {fmt_speed(spd) if spd else '?'}\n  {(ttl or '')[:35]}\n"
