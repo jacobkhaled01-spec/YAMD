@@ -643,7 +643,6 @@ async def on_admin(update, ctx):
 
 "
         for uid, un, fn, ln, lang, premium, cnt, active, seen, ip in rows:
-            # تفاصيل التحميلات الخاصة بالمستخدم
             total_size = db.execute("SELECT COALESCE(SUM(size),0) FROM downloads WHERE uid=?", (uid,)).fetchone()[0]
             total_dl = db.execute("SELECT COUNT(*) FROM downloads WHERE uid=?", (uid,)).fetchone()[0]
             audio_cnt = db.execute("SELECT COUNT(*) FROM downloads WHERE uid=? AND quality='a'", (uid,)).fetchone()[0]
