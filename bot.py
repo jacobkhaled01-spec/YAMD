@@ -30,14 +30,12 @@ if PROXY_LIST_RAW:
     for line in PROXY_LIST_RAW.splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
-            # التنسيق: IP:PORT:USERNAME:PASSWORD
             parts = line.split(":")
             if len(parts) == 4:
                 ip, port, user, pwd = parts
                 proxy_url = f"http://{user}:{pwd}@{ip}:{port}"
                 PROXY_POOL.append(proxy_url)
             elif len(parts) == 2:
-                # بدون مصادقة
                 ip, port = parts
                 proxy_url = f"http://{ip}:{port}"
                 PROXY_POOL.append(proxy_url)
@@ -46,7 +44,6 @@ if PROXY_LIST_RAW:
     else:
         print("⚠️ PROXY_LIST defined but no valid proxies parsed")
 else:
-    # الحفاظ على التوافق مع PROXY_URL القديم
     SINGLE_PROXY = os.environ.get("PROXY_URL", "").strip()
     if SINGLE_PROXY:
         PROXY_POOL.append(SINGLE_PROXY)
@@ -109,21 +106,39 @@ for lib in ("httpx", "httpcore", "telegram", "hpack", "asyncio", "aiohttp"):
     logging.getLogger(lib).setLevel(logging.ERROR)
 
 # ═══════════════════════════════════════════════════════════
-# قاعدة البيانات
+# قاعدة البيانات (مع عمود IP)
 # ═══════════════════════════════════════════════════════════
 db = sqlite3.connect("yamd.db", check_same_thread=False)
 db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
 
 def _setup_db() -> None:
-    db.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY, username TEXT, fname TEXT, seen TEXT, active TEXT, cnt INTEGER DEFAULT 0)")
+    db.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY, username TEXT, fname TEXT, lname TEXT, seen TEXT, active TEXT, cnt INTEGER DEFAULT 0, lang TEXT, premium INTEGER DEFAULT 0, ip TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS downloads(id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER, url TEXT, title TEXT, quality TEXT, size INTEGER, speed REAL, ts TEXT)")
+
+    cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    if "lname" not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN lname TEXT")
+    if "lang" not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN lang TEXT")
+    if "premium" not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN premium INTEGER DEFAULT 0")
+    if "ip" not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN ip TEXT")
     db.commit()
 _setup_db()
 
 def db_user(u) -> None:
     now = datetime.now().isoformat()
-    db.execute("INSERT INTO users(uid,username,fname,seen,active) VALUES(?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET active=excluded.active, username=COALESCE(excluded.username,username), fname=COALESCE(excluded.fname,fname), seen=excluded.seen", (u.id, u.username or "", u.first_name or "", now, now))
+    db.execute(
+        "INSERT INTO users(uid,username,fname,lname,seen,active,lang,premium) VALUES(?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(uid) DO UPDATE SET "
+        "active=excluded.active, username=COALESCE(excluded.username,username), "
+        "fname=COALESCE(excluded.fname,fname), lname=COALESCE(excluded.lname,lname), "
+        "lang=COALESCE(excluded.lang,lang), premium=COALESCE(excluded.premium,premium)",
+        (u.id, u.username or "", u.first_name or "", u.last_name or "",
+         now, now, u.language_code or "", 1 if u.is_premium else 0)
+    )
     db.commit()
 
 def db_log(uid, url, title, qkey, size, speed):
@@ -239,13 +254,11 @@ def _api_extract(url: str, extractor_args: dict, extra_opts: dict = None) -> dic
         "http_headers": {"User-Agent": YT_UA, **COMMON_HEADERS},
         "extractor_args": extractor_args,
     }
-    # ✅ بروكسي عشوائي
     proxy = get_random_proxy()
     if proxy:
         opts["proxy"] = proxy
     if extra_opts:
         opts.update(extra_opts)
-    
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
@@ -525,56 +538,21 @@ async def download_pinterest(ctx, chat_id, url, status_msg, uid):
         await status_msg.edit_text(f"❌ فشل تحميل Pinterest: {str(e)[:250]}"); cleanup(vid_id)
 
 # ═══════════════════════════════════════════════════════════
-# واجهة المستخدم (اختصار)
+# واجهة المستخدم (إخفاء /admin عن العامة)
 # ═══════════════════════════════════════════════════════════
 async def cmd_start(update, ctx):
     db_user(update.effective_user)
-    msg = (
-        f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀
-"
-        f"<b>{BOT_FULL_NAME}</b>
-
-"
-        "👋 مرحباً بك في تجربة التحميل الأسرع على تلغرام!
-
-"
-        "📌 <b>طريقة الاستخدام:</b>
-"
-        "1. انسخ رابط الفيديو من أي منصة (يوتيوب، تيك توك، فيسبوك، انستغرام، بنترست...)
-"
-        "2. أرسل الرابط هنا
-"
-        "3. اختر الجودة التي تريدها (فيديو بجودة معينة أو صوت MP3)
-"
-        "4. انتظر قليلاً واستلم الملف
-
-"
-        "✨ <b>الميزات:</b>
-"
-        "• 🎥 تحميل فيديو بجودات متعددة (144p - 4K)
-"
-        "• 🔊 تحميل الصوت بصيغة MP3
-"
-        "• 📦 تقسيم تلقائي للملفات الكبيرة (أكثر من 50MB)
-"
-        "• ⚡ سرعة فائقة حتى على الإنترنت الضعيف
-"
-        "• 🌐 دعم واسع للمنصات
-
-"
-        "💡 <b>جرب الآن:</b> أرسل رابط فيديو واختبر السرعة!
-"
-        "📖 للمزيد من المعلومات: /about"
-    )
+    msg = f"أهلاً بك في <b>{BOT_NAME}</b>! 🚀\n<b>{BOT_FULL_NAME}</b>\n\n⚡ أرسل رابط الفيديو من أي منصة.\n/about"
     await update.message.reply_text(msg, parse_mode="HTML")
+
 async def cmd_about(update, ctx):
     await update.message.reply_text(
         f"🌟 <b>{BOT_NAME}</b>\n<b>{BOT_FULL_NAME}</b>\n\n"
         "⚡ بوت تحميل سريع واحترافي\n"
         "🎥 تحميل فيديو وصوت بجودات متعددة\n"
         "📦 تقسيم تلقائي للملفات الكبيرة\n"
-        "🚀 أداء واستقرار عالي\n\n👨‍💻 المطور: @Yaaqob_Almahajeri"
-        "💡 أرسل رابط الفيديو من أي منصة وسيتم التحميل فوراً.",
+        "🚀 أداء واستقرار عالي\n\n"
+        "👨‍💻 المطور: @Yaaqob_Almahajeri",
         parse_mode="HTML"
     )
 
@@ -630,7 +608,7 @@ async def on_format_choice(update, ctx):
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt_str, qtype, q.message, q.from_user.id))
 
 # ═══════════════════════════════════════════════════════════
-# لوحة الإدارة (اختصار)
+# لوحة الإدارة (تفاصيل متقدمة + IP)
 # ═══════════════════════════════════════════════════════════
 async def cmd_admin(update, ctx):
     if update.effective_user.id != ADMIN_ID: await update.message.reply_text("⛔ للمشرف فقط."); return
@@ -654,9 +632,51 @@ async def on_admin(update, ctx):
     if q.from_user.id != ADMIN_ID: await q.answer("⛔", show_alert=True); return
     await q.answer(); act = q.data.split("|")[1]
     if act == "users":
-        rows = db.execute("SELECT uid,username,fname,cnt,active FROM users ORDER BY active DESC LIMIT 15").fetchall()
-        t = "👥 <b>آخر 15 مستخدم</b>\n\n"
-        for uid,un,fn,cnt,ac in rows: t += f"• <code>{uid}</code> {un or fn or 'Unknown'}  ⬇️{cnt}  {(ac or '')[:10]}\n"
+        rows = db.execute("""
+            SELECT u.uid, u.username, u.fname, u.lname, u.lang, u.premium,
+                   u.cnt, u.active, u.seen, u.ip,
+                   COALESCE(SUM(d.size), 0) AS total_size,
+                   COALESCE(AVG(d.speed), 0) AS avg_speed,
+                   COALESCE(SUM(CASE WHEN d.quality = 'a' THEN 1 ELSE 0 END), 0) AS audio_cnt,
+                   (SELECT COUNT(*) FROM downloads d2 WHERE d2.uid = u.uid) AS total_dl,
+                   (SELECT GROUP_CONCAT(d3.title, ' || ' LIMIT 3) FROM (SELECT title FROM downloads WHERE uid = u.uid ORDER BY id DESC LIMIT 3) d3) AS last_three_titles,
+                   (SELECT GROUP_CONCAT(d3.ts, ' || ' LIMIT 3) FROM (SELECT ts FROM downloads WHERE uid = u.uid ORDER BY id DESC LIMIT 3) d3) AS last_three_dates
+            FROM users u
+            LEFT JOIN downloads d ON u.uid = d.uid
+            GROUP BY u.uid
+            ORDER BY u.active DESC
+            LIMIT 15
+        """).fetchall()
+        t = "👥 <b>آخر 15 مستخدم (تحليل متقدم مع IP)</b>\n\n"
+        for uid, un, fn, ln, lang, premium, cnt, active, seen, ip, total_size, avg_speed, audio_cnt, total_dl, last_titles, last_dates in rows:
+            full_name = fn
+            if ln: full_name += " " + ln
+            name = un or full_name or "Unknown"
+            first_seen = (seen or "")[:10] if seen else "?"
+            last_active = (active or "")[:10] if active else "?"
+            days_active = "?"
+            if seen and active:
+                try:
+                    days_active = str((datetime.strptime(active[:10], "%Y-%m-%d") - datetime.strptime(seen[:10], "%Y-%m-%d")).days) + " يوم"
+                except: pass
+            lang_str = lang if lang else "غير محدد"
+            premium_icon = "🌟" if premium else ""
+            user_ip = ip if ip else "غير معروف"
+            t += (f"• {premium_icon} <code>{uid}</code> {name}\n"
+                  f"  @{un if un else 'لا يوجد'} | 🌐 {lang_str}\n"
+                  f"  🌍 IP: {user_ip}\n"
+                  f"  🔗 tg://user?id={uid}\n"
+                  f"  🗓 أول: {first_seen} | آخر: {last_active} | مدة: {days_active}\n"
+                  f"  📥 التحميلات: {total_dl} (🎥 فيديو: {total_dl - audio_cnt} | 🔊 صوت: {audio_cnt})\n"
+                  f"  📦 حجم: {fmt_size(total_size)} | ⚡ متوسط السرعة: {fmt_speed(avg_speed)}\n")
+            if last_titles:
+                titles_list = last_titles.split(" || ")[:3]
+                dates_list = (last_dates or "").split(" || ")[:3]
+                t += "  🎬 آخر التحميلات:\n"
+                for i, (title, date) in enumerate(zip(titles_list, dates_list), 1):
+                    t += f"    {i}. {title[:60]}\n"
+                    t += f"       🕒 {date[:16]}\n" if date else ""
+            t += "\n"
         await q.edit_message_text(t or "لا يوجد.", parse_mode="HTML")
     elif act == "dls":
         rows = db.execute("SELECT d.uid,d.title,d.quality,d.size,d.speed,d.ts,u.username FROM downloads d LEFT JOIN users u ON d.uid=u.uid ORDER BY d.id DESC LIMIT 20").fetchall()
@@ -676,7 +696,7 @@ async def on_admin(update, ctx):
 async def on_error(update, ctx): logger.error(f"[ERROR] {ctx.error}", exc_info=ctx.error)
 
 # ═══════════════════════════════════════════════════════════
-# التشغيل الرئيسي
+# خادم الويب (Webhook) مع التقاط IP
 # ═══════════════════════════════════════════════════════════
 async def main():
     if not BOT_TOKEN or not WEBHOOK_URL: raise RuntimeError("Missing BOT_TOKEN or WEBHOOK_URL")
@@ -699,8 +719,19 @@ async def main():
     asyncio.create_task(cleanup_task())
     web_app = web.Application()
     async def webhook_handler(request):
-        try: update = Update.de_json(await request.json(), app.bot); await app.process_update(update); return web.Response(text="ok")
-        except Exception as e: logger.error(f"Webhook error: {e}"); return web.Response(status=500, text="error")
+        try:
+            data = await request.json()
+            update = Update.de_json(data, app.bot)
+            if update and update.effective_user:
+                user_ip = request.remote
+                if user_ip:
+                    db.execute("UPDATE users SET ip=? WHERE uid=?", (user_ip, update.effective_user.id))
+                    db.commit()
+            await app.process_update(update)
+            return web.Response(text="ok")
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return web.Response(status=500, text="error")
     web_app.router.add_post(f"/{BOT_TOKEN}", webhook_handler)
     web_app.router.add_get("/", lambda r: web.Response(text="YAMD is running!"))
     runner = web.AppRunner(web_app); await runner.setup()
