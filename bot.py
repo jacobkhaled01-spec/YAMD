@@ -608,7 +608,7 @@ async def on_format_choice(update, ctx):
     asyncio.create_task(do_download(ctx, q.message.chat_id, url, fmt_str, qtype, q.message, q.from_user.id))
 
 # ═══════════════════════════════════════════════════════════
-# لوحة الإدارة (تفاصيل متقدمة + IP)
+# لوحة الإدارة (تفاصيل متقدمة + IP) – كود المستخدمين المصحح
 # ═══════════════════════════════════════════════════════════
 async def cmd_admin(update, ctx):
     if update.effective_user.id != ADMIN_ID: await update.message.reply_text("⛔ للمشرف فقط."); return
@@ -639,9 +639,7 @@ async def on_admin(update, ctx):
             ORDER BY u.active DESC
             LIMIT 15
         """).fetchall()
-        t = "👥 <b>آخر 15 مستخدم (تحليل متقدم مع IP)</b>
-
-"
+        t = "👥 <b>آخر 15 مستخدم (تحليل متقدم مع IP)</b>\n\n"
         for uid, un, fn, ln, lang, premium, cnt, active, seen, ip in rows:
             total_size = db.execute("SELECT COALESCE(SUM(size),0) FROM downloads WHERE uid=?", (uid,)).fetchone()[0]
             total_dl = db.execute("SELECT COUNT(*) FROM downloads WHERE uid=?", (uid,)).fetchone()[0]
@@ -662,31 +660,21 @@ async def on_admin(update, ctx):
             lang_str = lang if lang else "غير محدد"
             premium_icon = "🌟" if premium else ""
             user_ip = ip if ip else "غير معروف"
-            t += (f"• {premium_icon} <code>{uid}</code> {name}
-"
-                  f"  @{un if un else 'لا يوجد'} | 🌐 {lang_str}
-"
-                  f"  🌍 IP: {user_ip}
-"
-                  f"  🔗 tg://user?id={uid}
-"
-                  f"  🗓 أول: {first_seen} | آخر: {last_active} | مدة: {days_active}
-"
-                  f"  📥 التحميلات: {total_dl} (🎥 فيديو: {total_dl - audio_cnt} | 🔊 صوت: {audio_cnt})
-"
-                  f"  📦 حجم: {fmt_size(total_size)} | ⚡ متوسط السرعة: {fmt_speed(avg_speed)}
-")
+            t += (f"• {premium_icon} <code>{uid}</code> {name}\n"
+                  f"  @{un if un else 'لا يوجد'} | 🌐 {lang_str}\n"
+                  f"  🌍 IP: {user_ip}\n"
+                  f"  🔗 tg://user?id={uid}\n"
+                  f"  🗓 أول: {first_seen} | آخر: {last_active} | مدة: {days_active}\n"
+                  f"  📥 التحميلات: {total_dl} (🎥 فيديو: {total_dl - audio_cnt} | 🔊 صوت: {audio_cnt})\n"
+                  f"  📦 حجم: {fmt_size(total_size)} | ⚡ متوسط السرعة: {fmt_speed(avg_speed)}\n")
             if last_three:
-                t += "  🎬 آخر التحميلات:
-"
+                t += "  🎬 آخر التحميلات:\n"
                 for i, (title, date) in enumerate(last_three, 1):
-                    t += f"    {i}. {title[:60]}
-"
-                    if date: t += f"       🕒 {date[:16]}
-"
-            t += "
-"
-        await q.edit_message_text(t or "لا يوجد.", parse_mode="HTML")    elif act == "dls":
+                    t += f"    {i}. {title[:60]}\n"
+                    if date: t += f"       🕒 {date[:16]}\n"
+            t += "\n"
+        await q.edit_message_text(t or "لا يوجد.", parse_mode="HTML")
+    elif act == "dls":
         rows = db.execute("SELECT d.uid,d.title,d.quality,d.size,d.speed,d.ts,u.username FROM downloads d LEFT JOIN users u ON d.uid=u.uid ORDER BY d.id DESC LIMIT 20").fetchall()
         t = "📜 <b>آخر 20 تحميلة</b>\n\n"
         for uid,ttl,qual,sz,spd,ts,un in rows: t += f"• <b>{un or uid}</b> | {qual} | {fmt_size(sz) if sz else '?'} | {fmt_speed(spd) if spd else '?'}\n  {(ttl or '')[:35]}\n"
