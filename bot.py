@@ -549,24 +549,20 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
         
         # 1. استخراج الفيديو عبر TikWM السريع بدون علامة مائية
         data = None
-        api_urls = [
-            f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}&hd=1",
-            f"https://api.tikwm.com/api/?url={urllib.parse.quote(url)}&hd=1"
-        ]
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*"
         }
         
-        async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as session:
-            for api in api_urls:
+        try:
+            async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as session:
+                # محاولة POST أولاً
                 try:
-                    async with session.get(api) as resp:
+                    async with session.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}) as resp:
                         if resp.status == 200:
                             res_json = await resp.json(content_type=None)
                             if res_json and res_json.get("code") == 0 and res_json.get("data"):
                                 data = res_json.get("data")
-                                break
                             elif res_json and res_json.get("code") == -1:
                                 msg = res_json.get("msg", "")
                                 if "private" in msg.lower() or "not found" in msg.lower() or "deleted" in msg.lower():
@@ -574,8 +570,21 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
                                     cleanup(vid_id)
                                     return
                 except Exception as e:
-                    logger.warning(f"TikTok API attempt failed: {e}")
-                    continue
+                    logger.warning(f"TikWM POST failed: {e}")
+
+                # محاولة GET كبديل
+                if not data:
+                    try:
+                        get_url = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url, safe='')}&hd=1"
+                        async with session.get(get_url) as resp:
+                            if resp.status == 200:
+                                res_json = await resp.json(content_type=None)
+                                if res_json and res_json.get("code") == 0 and res_json.get("data"):
+                                    data = res_json.get("data")
+                    except Exception as e:
+                        logger.warning(f"TikWM GET failed: {e}")
+        except Exception as e:
+            logger.warning(f"TikTok API session error: {e}")
 
         if data:
             video_url = data.get("hdplay") or data.get("play")
@@ -665,10 +674,15 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
             "socket_timeout": 60,
             "geo_bypass": True,
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer": "https://www.tiktok.com/",
             }
         }
+        try:
+            import curl_cffi
+            ytdl_opts["impersonate"] = "chrome"
+        except ImportError:
+            pass
         proxy = get_random_proxy()
         if proxy:
             ytdl_opts["proxy"] = proxy
