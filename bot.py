@@ -539,6 +539,32 @@ async def download_pinterest(ctx, chat_id, url, status_msg, uid):
     except Exception as e:
         await status_msg.edit_text(f"❌ فشل تحميل Pinterest: {str(e)[:250]}"); cleanup(vid_id)
 
+def _fetch_tikwm_sync(url: str) -> Optional[dict]:
+    try:
+        api = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}"
+        req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            res = json.loads(r.read().decode())
+            if res and res.get("code") == 0 and res.get("data"):
+                return res.get("data")
+    except Exception as e:
+        logger.warning(f"TikWM fetch error: {e}")
+    return None
+
+def _download_stream_sync(stream_url: str, output_path: str) -> bool:
+    try:
+        req = urllib.request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(output_path, "wb") as f:
+            while True:
+                chunk = r.read(128 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    except Exception as e:
+        logger.warning(f"Download stream error: {e}")
+        return False
+
 async def download_tiktok(ctx, chat_id, url, status_msg, uid):
     loop = asyncio.get_running_loop()
     t0 = time.time()
@@ -547,52 +573,16 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
     try:
         await safe_edit(status_msg, "🔍 جلب معلومات TikTok...")
         
-        # 1. استخراج الفيديو عبر TikWM السريع بدون علامة مائية
-        data = None
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*"
-        }
+        # 1. استخراج فوري بدون علامة مائية عبر TikWM (باستخدام urllib الموثوق)
+        data = await loop.run_in_executor(None, lambda: _fetch_tikwm_sync(url))
         
-        try:
-            async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as session:
-                # محاولة POST أولاً
-                try:
-                    async with session.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}) as resp:
-                        if resp.status == 200:
-                            res_json = await resp.json(content_type=None)
-                            if res_json and res_json.get("code") == 0 and res_json.get("data"):
-                                data = res_json.get("data")
-                            elif res_json and res_json.get("code") == -1:
-                                msg = res_json.get("msg", "")
-                                if "private" in msg.lower() or "not found" in msg.lower() or "deleted" in msg.lower():
-                                    await status_msg.edit_text("⚠️ هذا الفيديو غير متاح (قد يكون الحساب خاصاً أو تم حذف المقطع).")
-                                    cleanup(vid_id)
-                                    return
-                except Exception as e:
-                    logger.warning(f"TikWM POST failed: {e}")
-
-                # محاولة GET كبديل
-                if not data:
-                    try:
-                        get_url = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url, safe='')}&hd=1"
-                        async with session.get(get_url) as resp:
-                            if resp.status == 200:
-                                res_json = await resp.json(content_type=None)
-                                if res_json and res_json.get("code") == 0 and res_json.get("data"):
-                                    data = res_json.get("data")
-                    except Exception as e:
-                        logger.warning(f"TikWM GET failed: {e}")
-        except Exception as e:
-            logger.warning(f"TikTok API session error: {e}")
-
         if data:
             video_url = data.get("hdplay") or data.get("play")
             title = (data.get("title") or "فيديو TikTok")[:200]
             author = (data.get("author", {}).get("nickname") or data.get("author", {}).get("unique_id") or "TikTok")[:100]
             images = data.get("images")
 
-            # إذا كان المحتوى عبارة عن ألبوم صور
+            # إذا كان ألبوم صور
             if images and isinstance(images, list) and len(images) > 0 and not video_url:
                 await safe_edit(status_msg, f"📸 إرسال ألبوم صور ({len(images)} صورة)...")
                 media_group = []
@@ -609,67 +599,62 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
 
             if video_url:
                 await safe_edit(status_msg, "⬇️ جارٍ تحميل الفيديو بدون علامة مائية...")
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as dl_session:
-                    async with dl_session.get(video_url) as v_resp:
-                        if v_resp.status == 200:
-                            with open(output, "wb") as f:
-                                async for chunk in v_resp.content.iter_chunked(64 * 1024):
-                                    f.write(chunk)
-                        else:
-                            raise RuntimeError(f"HTTP status {v_resp.status} أثناء تحميل الفيديو")
+                success = await loop.run_in_executor(None, lambda: _download_stream_sync(video_url, output))
+                if not success or not os.path.exists(output) or os.path.getsize(output) == 0:
+                    raise RuntimeError("فشل تنزيل ملف الفيديو من الخادم.")
 
-                if os.path.exists(output) and os.path.getsize(output) > 0:
-                    size = os.path.getsize(output)
-                    elapsed = max(1, int(time.time() - t0))
-                    speed = (size / 1024) / elapsed
+                size = os.path.getsize(output)
+                elapsed = max(1, int(time.time() - t0))
+                speed = (size / 1024) / elapsed
 
-                    if size > MAX_SIZE:
-                        await safe_edit(status_msg, "📦 تقسيم...")
-                        parts = await loop.run_in_executor(None, lambda: split_video(output, MAX_SIZE))
-                        if not parts:
-                            await status_msg.edit_text("❌ فشل التقسيم.")
-                            cleanup(vid_id)
-                            return
-                        total = len(parts)
-                        base_cap = f"<b>{title}</b>\n👤 {author}\n📥 {BOT_NAME}\n"
-                        for i, p in enumerate(parts, 1):
-                            ps = os.path.getsize(p)
-                            with open(p, "rb") as vf:
-                                await ctx.bot.send_video(chat_id=chat_id, video=vf, caption=f"{base_cap}📦 جزء {i}/{total} | {fmt_size(ps)}", parse_mode="HTML", read_timeout=600, write_timeout=600, supports_streaming=True)
-                            try: os.remove(p)
-                            except: pass
-                        await safe_edit(status_msg, "✅ تم.")
-                    else:
-                        await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}... ⏱ {elapsed}ث")
-                        caption = f"<b>{title}</b>\n👤 {author}\n⚡ {fmt_speed(speed)} | ⏱ {elapsed}ث\n📥 {BOT_NAME}"
-                        with open(output, "rb") as vf:
-                            await ctx.bot.send_video(chat_id=chat_id, video=vf, caption=caption, parse_mode="HTML", read_timeout=600, write_timeout=600, supports_streaming=True)
-                        try: await status_msg.delete()
+                if size > MAX_SIZE:
+                    await safe_edit(status_msg, "📦 تقسيم...")
+                    parts = await loop.run_in_executor(None, lambda: split_video(output, MAX_SIZE))
+                    if not parts:
+                        await status_msg.edit_text("❌ فشل التقسيم.")
+                        cleanup(vid_id)
+                        return
+                    total = len(parts)
+                    base_cap = f"<b>{title}</b>\n👤 {author}\n📥 {BOT_NAME}\n"
+                    for i, p in enumerate(parts, 1):
+                        ps = os.path.getsize(p)
+                        with open(p, "rb") as vf:
+                            await ctx.bot.send_video(chat_id=chat_id, video=vf, caption=f"{base_cap}📦 جزء {i}/{total} | {fmt_size(ps)}", parse_mode="HTML", read_timeout=600, write_timeout=600, supports_streaming=True)
+                        try: os.remove(p)
                         except: pass
+                    await safe_edit(status_msg, "✅ تم.")
+                else:
+                    await safe_edit(status_msg, f"📤 رفع {fmt_size(size)}... ⏱ {elapsed}ث")
+                    caption = f"<b>{title}</b>\n👤 {author}\n⚡ {fmt_speed(speed)} | ⏱ {elapsed}ث\n📥 {BOT_NAME}"
+                    with open(output, "rb") as vf:
+                        await ctx.bot.send_video(chat_id=chat_id, video=vf, caption=caption, parse_mode="HTML", read_timeout=600, write_timeout=600, supports_streaming=True)
+                    try: await status_msg.delete()
+                    except: pass
 
-                    db_log(uid, url, title, "tiktok", size, speed)
-                    cleanup(vid_id)
-                    return
+                db_log(uid, url, title, "tiktok", size, speed)
+                cleanup(vid_id)
+                return
 
-        # 2. محاولة بديلة عبر yt-dlp في حال تعذر الـ API
+        # 2. محاولة بديلة عبر yt-dlp
         await safe_edit(status_msg, "🔄 محاولة بديلة عبر yt-dlp...")
         real_url = url
         try:
-            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=aiohttp.ClientTimeout(total=10)) as red_session:
-                async with red_session.get(url, allow_redirects=True) as red_resp:
-                    if red_resp.url and "tiktok.com" in str(red_resp.url):
-                        red_str = str(red_resp.url)
-                        if "?_r=1" in red_str and not ("/video/" in red_str or "/photo/" in red_str):
-                            await status_msg.edit_text("⚠️ هذا الرابط غير صالح أو تم حذف الفيديو من TikTok.")
-                            cleanup(vid_id)
-                            return
-                        real_url = red_str
-        except:
+            req_red = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+            with opener.open(req_red) as red_resp:
+                red_str = red_resp.geturl()
+                if red_str and "tiktok.com" in red_str:
+                    if "?_r=1" in red_str and not ("/video/" in red_str or "/photo/" in red_str):
+                        await status_msg.edit_text("⚠️ هذا الرابط غير صالح أو تم حذف الفيديو من TikTok.")
+                        cleanup(vid_id)
+                        return
+                    real_url = red_str
+        except Exception:
             pass
 
         ytdl_opts = {
-            "outtmpl": output,
-            "quiet": True,
+            "outtmpl": str(DL_DIR / f"{vid_id}.%(ext)s"),
+            "quiet": False,
             "no_warnings": True,
             "socket_timeout": 60,
             "geo_bypass": True,
@@ -732,7 +717,7 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
         cleanup(vid_id)
 
     except Exception as e:
-        err_text = str(e)
+        err_text = str(e).strip() or repr(e)
         if "Unsupported URL" in err_text and "?_r=1" in err_text:
             await status_msg.edit_text("⚠️ هذا الرابط غير متاح (قد يكون محذوفاً أو الحساب خاصاً في TikTok).")
         else:
