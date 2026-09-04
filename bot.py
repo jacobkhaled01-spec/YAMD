@@ -679,9 +679,10 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
             }
         }
         try:
-            import curl_cffi
-            ytdl_opts["impersonate"] = "chrome"
-        except ImportError:
+            import importlib.util
+            if importlib.util.find_spec("curl_cffi") is not None:
+                ytdl_opts["impersonate"] = "chrome"
+        except Exception:
             pass
         proxy = get_random_proxy()
         if proxy:
