@@ -540,20 +540,43 @@ async def download_pinterest(ctx, chat_id, url, status_msg, uid):
         await status_msg.edit_text(f"❌ فشل تحميل Pinterest: {str(e)[:250]}"); cleanup(vid_id)
 
 def _fetch_tikwm_sync(url: str) -> Optional[dict]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+    }
+    # 1. المحاولة عبر POST (الأكثر استقراراً وتوافقاً مع TikWM)
     try:
-        api = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}"
-        req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        post_data = urllib.parse.urlencode({"url": url, "hd": "1"}).encode("utf-8")
+        req = urllib.request.Request("https://www.tikwm.com/api/", data=post_data, headers=headers)
         with urllib.request.urlopen(req, timeout=12) as r:
-            res = json.loads(r.read().decode())
+            res = json.loads(r.read().decode("utf-8", errors="ignore"))
             if res and res.get("code") == 0 and res.get("data"):
                 return res.get("data")
     except Exception as e:
-        logger.warning(f"TikWM fetch error: {e}")
+        logger.warning(f"TikWM POST error: {e}")
+
+    # 2. المحاولة عبر GET كبديل
+    try:
+        get_url = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url, safe='')}&hd=1"
+        req = urllib.request.Request(get_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as r:
+            res = json.loads(r.read().decode("utf-8", errors="ignore"))
+            if res and res.get("code") == 0 and res.get("data"):
+                return res.get("data")
+    except Exception as e:
+        logger.warning(f"TikWM GET error: {e}")
+
     return None
 
 def _download_stream_sync(stream_url: str, output_path: str) -> bool:
     try:
-        req = urllib.request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        if stream_url.startswith("/"):
+            stream_url = f"https://www.tikwm.com{stream_url}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.tiktok.com/",
+        }
+        req = urllib.request.Request(stream_url, headers=headers)
         with urllib.request.urlopen(req, timeout=60) as r, open(output_path, "wb") as f:
             while True:
                 chunk = r.read(128 * 1024)
@@ -663,18 +686,14 @@ async def download_tiktok(ctx, chat_id, url, status_msg, uid):
                 "Referer": "https://www.tiktok.com/",
             }
         }
-        try:
-            import importlib.util
-            if importlib.util.find_spec("curl_cffi") is not None:
-                ytdl_opts["impersonate"] = "chrome"
-        except Exception:
-            pass
         proxy = get_random_proxy()
         if proxy:
             ytdl_opts["proxy"] = proxy
         if COOKIE_FILE and os.path.exists(COOKIE_FILE):
             ytdl_opts["cookiefile"] = COOKIE_FILE
 
+        info = None
+        raw = None
         with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(real_url, download=True))
             raw = ydl.prepare_filename(info)
