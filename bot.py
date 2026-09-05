@@ -902,14 +902,21 @@ async def on_admin(update, ctx):
 async def on_error(update, ctx): logger.error(f"[ERROR] {ctx.error}", exc_info=ctx.error)
 
 # ═══════════════════════════════════════════════════════════
-# خادم الويب (Webhook) مع التقاط IP
+# خادم الويب (Webhook / Health Check)
 # ═══════════════════════════════════════════════════════════
 async def main():
-    if not BOT_TOKEN or not WEBHOOK_URL: raise RuntimeError("Missing BOT_TOKEN or WEBHOOK_URL")
-    await _ensure_ytdlp_updated()
-    tmp = Application.builder().token(BOT_TOKEN).build()
-    await tmp.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🧹 Old webhook removed")
+    if not BOT_TOKEN:
+        raise RuntimeError("Missing BOT_TOKEN environment variable")
+
+    # تشغيل التحديثات والتنظيف في الخلفية لضمان سرعة الاستجابة للمنفذ
+    asyncio.create_task(_ensure_ytdlp_updated())
+    asyncio.create_task(cleanup_task())
+
+    # إعداد خادم الويب فوراً وفتحه على PORT لاجتياز فحص Render.com
+    web_app = web.Application()
+    web_app.router.add_get("/", lambda r: web.Response(text="⚡ YAMD is running!"))
+    web_app.router.add_get("/healthz", lambda r: web.Response(text="ok"))
+
     app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(600).write_timeout(600).pool_timeout(120).concurrent_updates(2).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("about", cmd_about))
@@ -918,38 +925,63 @@ async def main():
     app.add_handler(CallbackQueryHandler(on_admin, pattern=r"^a\|"))
     app.add_handler(CallbackQueryHandler(on_format_choice, pattern=r"^dl\|"))
     app.add_error_handler(on_error)
-    await app.initialize(); await app.start()
-    webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    await app.bot.set_webhook(url=webhook_url, allowed_updates=["message","callback_query"])
-    logger.info("✅ Webhook configured")
-    asyncio.create_task(cleanup_task())
-    web_app = web.Application()
-    async def webhook_handler(request):
-        try:
-            data = await request.json()
-            update = Update.de_json(data, app.bot)
-            if update and update.effective_user:
-                user_ip = request.remote
-                if user_ip:
-                    db.execute("UPDATE users SET ip=? WHERE uid=?", (user_ip, update.effective_user.id))
-                    db.commit()
-            await app.process_update(update)
-            return web.Response(text="ok")
-        except Exception as e:
-            logger.error(f"Webhook error: {e}")
-            return web.Response(status=500, text="error")
-    web_app.router.add_post(f"/{BOT_TOKEN}", webhook_handler)
-    web_app.router.add_get("/", lambda r: web.Response(text="YAMD is running!"))
-    runner = web.AppRunner(web_app); await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT); await site.start()
-    logger.info(f"🌐 Webhook server on port {PORT}")
+
+    if WEBHOOK_URL:
+        async def webhook_handler(request):
+            try:
+                data = await request.json()
+                update = Update.de_json(data, app.bot)
+                if update and update.effective_user:
+                    user_ip = request.remote
+                    if user_ip:
+                        db.execute("UPDATE users SET ip=? WHERE uid=?", (user_ip, update.effective_user.id))
+                        db.commit()
+                await app.process_update(update)
+                return web.Response(text="ok")
+            except Exception as e:
+                logger.error(f"Webhook error: {e}")
+                return web.Response(status=500, text="error")
+
+        web_app.router.add_post(f"/{BOT_TOKEN}", webhook_handler)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"🌐 Web server listening on port {PORT}")
+    print(f"🌐 Web server listening on port {PORT}")
+
+    await app.initialize()
+    await app.start()
+
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
+        await app.bot.set_webhook(url=webhook_url, allowed_updates=["message", "callback_query"])
+        logger.info(f"✅ Webhook configured: {webhook_url}")
+        print(f"✅ Webhook configured: {webhook_url}")
+    else:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        await app.updater.start_polling(allowed_updates=["message", "callback_query"])
+        logger.info("✅ Started long polling (no WEBHOOK_URL specified)")
+        print("✅ Started long polling (no WEBHOOK_URL specified)")
+
     try:
-        while True: await asyncio.sleep(3600)
+        while True:
+            await asyncio.sleep(3600)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
-        await app.bot.delete_webhook(drop_pending_updates=True); await app.stop(); await app.shutdown()
+        if not WEBHOOK_URL and app.updater and getattr(app.updater, "running", False):
+            await app.updater.stop()
+        if WEBHOOK_URL:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+        await app.stop()
+        await app.shutdown()
+        await runner.cleanup()
         logger.info("Bot stopped cleanly")
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except Exception: logger.critical(f"Fatal: {traceback.format_exc()}"); sys.exit(1)
+    try:
+        asyncio.run(main())
+    except Exception:
+        logger.critical(f"Fatal: {traceback.format_exc()}")
+        sys.exit(1)
